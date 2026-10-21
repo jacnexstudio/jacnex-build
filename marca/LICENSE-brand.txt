@@ -1,0 +1,5 @@
+Jacnex brand
+
+The Jacnex name, wordmark and logos in this folder are the marks of Jacnex (https://jacnex.com).
+They are not open source and are not covered by the MIT or Apache-2.0 license of the code.
+Forks and modified versions must remove them.

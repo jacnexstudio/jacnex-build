@@ -1,0 +1,111 @@
+# Compila una app de ArtCraft con la marca Jacnex para Windows (x64) y, si se pide, la publica
+# como versión (release) en el repositorio que llama a este flujo.
+# Lo usan los repositorios de cada app: jacnexstudio/jacnex-studio, jacnexstudio/photocraft, ...
+
+name: Compilar para Windows
+
+on:
+  workflow_call:
+    inputs:
+      proyecto:
+        description: "Reglas de rebrand/reglas a usar (launcher, photocraft, ...)"
+        type: string
+        required: true
+      upstream:
+        description: "Repositorio original, p. ej. storytold/craft-launcher"
+        type: string
+        required: true
+      nombre:
+        description: "Nombre para mostrar, p. ej. Jacnex Studio"
+        type: string
+        required: true
+      ref:
+        description: "Versión original a compilar (etiqueta). Vacío: la última publicada."
+        type: string
+        default: ""
+      publicar:
+        description: "Publicar la versión en este repositorio"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Elegir la versión original
+        id: version
+        shell: pwsh
+        run: |
+          $ref = '${{ inputs.ref }}'
+          if (-not $ref) { $ref = gh release view --repo '${{ inputs.upstream }}' --json tagName --jq .tagName }
+          if (-not $ref) { throw 'No se encontró ninguna versión publicada en ${{ inputs.upstream }}' }
+          "ref=$ref" >> $env:GITHUB_OUTPUT
+          Write-Output "Compilando ${{ inputs.upstream }} $ref"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jacnexstudio/jacnex-build
+          path: jb
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.upstream }}
+          ref: ${{ steps.version.outputs.ref }}
+          path: src
+
+      - name: Cambio de marca
+        run: python -B jb/rebrand/rebrand.py ${{ inputs.proyecto }} src
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src
+
+      - name: Instalar WiX (instalador MSI)
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+
+      - name: Compilar y empaquetar
+        shell: pwsh
+        working-directory: src
+        env:
+          DIST: ${{ github.workspace }}/dist
+        run: pwsh packaging/windows/package.ps1 -Arch x64
+
+      - name: Huellas SHA-256
+        shell: pwsh
+        working-directory: dist
+        run: |
+          Get-ChildItem -File | Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.proyecto }}-${{ steps.version.outputs.ref }}-windows-x64
+          path: dist/*
+
+      - name: Publicar versión
+        if: inputs.publicar
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.version.outputs.ref }}'
+          $repo = '${{ github.repository }}'
+          $notas = "${{ inputs.nombre }} $tag, compilado desde ${{ inputs.upstream }} $tag con la marca Jacnex. Código y cambios: https://github.com/jacnexstudio/jacnex-build"
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag (Get-ChildItem dist -File).FullName --repo $repo --clobber
+          } else {
+            gh release create $tag (Get-ChildItem dist -File).FullName --repo $repo --title "${{ inputs.nombre }} $tag" --notes $notas
+          }

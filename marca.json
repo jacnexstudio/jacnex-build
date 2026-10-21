@@ -1,0 +1,44 @@
+{
+  "empresa": "Jacnex",
+  "web": "https://jacnex.com",
+  "soporte": "https://jacnex.com/soporte",
+  "github": "jacnexstudio",
+  "prefijo_id": "com.jacnex",
+  "suite": "Jacnex Suite",
+  "launcher": {
+    "nombre": "Jacnex Studio",
+    "id": "jacnex-studio",
+    "repo": "jacnex-studio",
+    "upstream": "storytold/craft-launcher"
+  },
+  "apps": {
+    "photocraft": { "nombre": "Jacnex Photo", "anteriores": [] },
+    "vectorcraft": { "nombre": "Jacnex Vector", "anteriores": [] },
+    "filmcraft": { "nombre": "Jacnex Film", "anteriores": [] },
+    "lightcraft": { "nombre": "Jacnex Light", "anteriores": [] },
+    "pdfcraft": { "nombre": "Jacnex PDF", "anteriores": ["PrintCraft"] },
+    "effectcraft": { "nombre": "Jacnex Motion", "anteriores": [] },
+    "designcraft": { "nombre": "Jacnex Layout", "anteriores": [] },
+    "figcraft": { "nombre": "Jacnex Proto", "anteriores": [] },
+    "wordcraft": { "nombre": "Jacnex Write", "anteriores": [] },
+    "soundcraft": { "nombre": "Jacnex Sound", "anteriores": [] },
+    "deckcraft": { "nombre": "Jacnex Deck", "anteriores": [] },
+    "cadcraft": { "nombre": "Jacnex CAD", "anteriores": [] },
+    "gridcraft": { "nombre": "Jacnex Grid", "anteriores": [] }
+  },
+  "nombres_originales": {
+    "photocraft": "PhotoCraft",
+    "vectorcraft": "VectorCraft",
+    "filmcraft": "FilmCraft",
+    "lightcraft": "LightCraft",
+    "pdfcraft": "PdfCraft",
+    "effectcraft": "EffectCraft",
+    "designcraft": "DesignCraft",
+    "figcraft": "FigCraft",
+    "wordcraft": "WordCraft",
+    "soundcraft": "SoundCraft",
+    "deckcraft": "DeckCraft",
+    "cadcraft": "CADCraft",
+    "gridcraft": "GridCraft"
+  }
+}

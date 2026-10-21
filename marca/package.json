@@ -1,0 +1,8 @@
+{
+  "name": "jacnex-marca",
+  "private": true,
+  "type": "module",
+  "description": "Genera los PNG, ICO e ICNS de la marca a partir de los SVG de svg/.",
+  "scripts": { "generar": "node generar.mjs" },
+  "dependencies": { "@resvg/resvg-js": "2.6.2" }
+}
