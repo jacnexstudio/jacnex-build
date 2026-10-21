@@ -1,23 +1,13 @@
-// Genera los PNG, ICO e ICNS de la marca a partir de svg/. Uso: npm install && npm run generar
+// Genera los PNG, ICO e ICNS de la marca a partir de svg/ (que escribe disenar.py).
+// Uso: npm install && npm run generar
 import { Resvg } from '@resvg/resvg-js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 const SALIDA = 'generado';
-mkdirSync(SALIDA, { recursive: true });
+const TAMANOS = [16, 24, 32, 48, 64, 128, 256, 512, 1024];
 
 const png = (svg, ancho) => new Resvg(readFileSync(`svg/${svg}`, 'utf8'), { fitTo: { mode: 'width', value: ancho } }).render().asPng();
-const guardar = (nombre, datos) => { writeFileSync(`${SALIDA}/${nombre}`, datos); console.log(nombre, datos.length, 'bytes'); };
-
-guardar('logo.png', png('logo.svg', 3200));
-guardar('logo-white.png', png('logo-white.svg', 3200));
-guardar('mark.png', png('mark.svg', 1024));
-guardar('mark-64.png', png('mark.svg', 64));
-guardar('mark-black.png', png('mark-black.svg', 1024));
-guardar('mark-black-44.png', png('mark-black.svg', 44));
-
-const tamanos = [16, 24, 32, 48, 64, 128, 256, 512, 1024];
-const iconos = Object.fromEntries(tamanos.map((t) => [t, png('mark.svg', t)]));
-for (const t of tamanos) guardar(`icon-${t}.png`, iconos[t]);
+const guardar = (ruta, datos) => { writeFileSync(`${SALIDA}/${ruta}`, datos); };
 
 // ICO con imágenes PNG dentro (válido desde Windows Vista).
 function ico(lista) {
@@ -34,7 +24,6 @@ function ico(lista) {
   });
   return Buffer.concat([cabecera, ...entradas, ...lista.map(([, d]) => d)]);
 }
-guardar('icon.ico', ico([16, 24, 32, 48, 64, 128, 256].map((t) => [t, iconos[t]])));
 
 // ICNS con PNG: ic07=128, ic08=256, ic09=512, ic10=1024.
 function icns(lista) {
@@ -43,9 +32,30 @@ function icns(lista) {
     c.write(tipo, 0, 'ascii'); c.writeUInt32BE(datos.length + 8, 4);
     return Buffer.concat([c, datos]);
   });
-  const total = 8 + bloques.reduce((s, b) => s + b.length, 0);
   const c = Buffer.alloc(8);
-  c.write('icns', 0, 'ascii'); c.writeUInt32BE(total, 4);
+  c.write('icns', 0, 'ascii'); c.writeUInt32BE(8 + bloques.reduce((s, b) => s + b.length, 0), 4);
   return Buffer.concat([c, ...bloques]);
 }
-guardar('icon.icns', icns([['ic07', iconos[128]], ['ic08', iconos[256]], ['ic09', iconos[512]], ['ic10', iconos[1024]]]));
+
+/** Juego completo de íconos de una app: icon-<t>.png, icon.ico e icon.icns en `carpeta`. */
+function juegoDeIconos(svg, carpeta) {
+  mkdirSync(`${SALIDA}/${carpeta}`, { recursive: true });
+  const iconos = Object.fromEntries(TAMANOS.map((t) => [t, png(svg, t)]));
+  for (const t of TAMANOS) guardar(`${carpeta}/icon-${t}.png`, iconos[t]);
+  guardar(`${carpeta}/icon.ico`, ico([16, 24, 32, 48, 64, 128, 256].map((t) => [t, iconos[t]])));
+  guardar(`${carpeta}/icon.icns`, icns([['ic07', iconos[128]], ['ic08', iconos[256]], ['ic09', iconos[512]], ['ic10', iconos[1024]]]));
+}
+
+mkdirSync(SALIDA, { recursive: true });
+guardar('logo.png', png('logo.svg', 3200));
+guardar('logo-white.png', png('logo-white.svg', 3200));
+guardar('logo-vertical.png', png('logo-vertical.svg', 1600));
+guardar('mark.png', png('mark.svg', 1024));
+guardar('mark-64.png', png('mark.svg', 64));
+guardar('mark-black.png', png('mark-black.svg', 1024));
+guardar('mark-black-44.png', png('mark-black.svg', 44));
+
+juegoDeIconos('mark.svg', 'launcher');
+const apps = readdirSync('svg/apps').filter((f) => f.endsWith('.svg')).map((f) => f.slice(0, -4));
+for (const app of apps) juegoDeIconos(`apps/${app}.svg`, `apps/${app}`);
+console.log(`Listo: logos, launcher y ${apps.length} apps en ${SALIDA}/`);

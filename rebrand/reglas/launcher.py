@@ -34,28 +34,13 @@ def nombres_de_archivo(marca):
 
 def copias_de_marca(marca):
     """(destino dentro del código, archivo en marca/) — después de renombrar."""
-    lid, prefijo = marca["launcher"]["id"], marca["prefijo_id"]
-    copias = [
-        ("docs/brand/jacnex-logo.svg", "svg/logo.svg"),
-        ("docs/brand/jacnex-logo-white.svg", "svg/logo-white.svg"),
-        ("docs/brand/jacnex-mark.svg", "svg/mark.svg"),
-        ("docs/brand/jacnex-mark-black.svg", "svg/mark-black.svg"),
-        ("docs/brand/jacnex-logo.png", "generado/logo.png"),
-        ("docs/brand/jacnex-logo-white.png", "generado/logo-white.png"),
-        ("docs/brand/jacnex-mark.png", "generado/mark.png"),
-        ("docs/brand/jacnex-mark-64.png", "generado/mark-64.png"),
-        ("docs/brand/jacnex-mark-black.png", "generado/mark-black.png"),
-        ("docs/brand/jacnex-mark-black-44.png", "generado/mark-black-44.png"),
-        ("docs/brand/LICENSE-brand.txt", "LICENSE-brand.txt"),
-        (f"assets/app-icon/{lid}.svg", "svg/mark.svg"),
-        (f"assets/app-icon/{lid}-1024.png", "generado/icon-1024.png"),
-        (f"assets/app-icon/{lid}.ico", "generado/icon.ico"),
-        (f"assets/app-icon/{lid}.icns", "generado/icon.icns"),
-        (f"assets/app-icon/hicolor/scalable/apps/{prefijo}.{lid}.svg", "svg/mark.svg"),
+    lid = marca["launcher"]["id"]
+    return [
+        *comunes.copias_logos(),
+        *comunes.copias_icono(lid, f"{marca['prefijo_id']}.{lid}", "svg/mark.svg", "launcher"),
+        # Íconos de cada app en el catálogo del launcher.
+        *[(f"assets/app-icons/{app}.png", f"generado/apps/{app}/icon-128.png") for app in marca["apps"]],
     ]
-    for t in (16, 24, 32, 48, 64, 128, 256, 512):
-        copias.append((f"assets/app-icon/hicolor/{t}x{t}/apps/{prefijo}.{lid}.png", f"generado/icon-{t}.png"))
-    return copias
 
 
 def parches(carpeta, marca, parche):

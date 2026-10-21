@@ -1,7 +1,7 @@
 """Reglas para PhotoCraft -> Next Photo (storytold/photocraft).
 
-Los íconos de la app (assets/app-icon) tienen la misma licencia que el código, así que se conservan;
-solo se reemplazan los logos de ArtCraft (docs/brand), que no son libres.
+Se reemplazan los logos de ArtCraft (docs/brand), que no son libres, y el ícono de la app por el
+hexagonal de Jacnex.
 """
 
 from reglas import comunes
@@ -31,15 +31,9 @@ def nombres_de_archivo(marca):
 
 def copias_de_marca(marca):
     return [
-        ("docs/brand/jacnex-logo.svg", "svg/logo.svg"),
-        ("docs/brand/jacnex-logo-white.svg", "svg/logo-white.svg"),
-        ("docs/brand/jacnex-mark.svg", "svg/mark.svg"),
-        ("docs/brand/jacnex-mark-black.svg", "svg/mark-black.svg"),
-        ("docs/brand/jacnex-logo.png", "generado/logo.png"),
-        ("docs/brand/jacnex-logo-white.png", "generado/logo-white.png"),
-        ("docs/brand/jacnex-mark.png", "generado/mark.png"),
-        ("docs/brand/jacnex-mark-black.png", "generado/mark-black.png"),
-        ("docs/brand/LICENSE-brand.txt", "LICENSE-brand.txt"),
+        *comunes.copias_logos(),
+        *comunes.copias_icono(APP, f"{marca['prefijo_id']}.{APP}", f"svg/apps/{APP}.svg", f"apps/{APP}"),
+        (f"assets/app-icon/{APP}-small.svg", f"svg/apps/{APP}.svg"),
     ]
 
 

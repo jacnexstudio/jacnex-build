@@ -87,3 +87,37 @@ def cambiar_upgrade_codes(carpeta, proyecto):
             wxs.write_text(nuevo, encoding="utf-8", newline="")
             cambiados += 1
     return cambiados
+
+
+TAMANOS_HICOLOR = (16, 24, 32, 48, 64, 128, 256, 512)
+
+
+def copias_logos():
+    """Logos de Jacnex en lugar de los de ArtCraft (docs/brand, ya renombrados a jacnex-*)."""
+    return [
+        ("docs/brand/jacnex-logo.svg", "svg/logo.svg"),
+        ("docs/brand/jacnex-logo-white.svg", "svg/logo-white.svg"),
+        ("docs/brand/jacnex-mark.svg", "svg/mark.svg"),
+        ("docs/brand/jacnex-mark-black.svg", "svg/mark-black.svg"),
+        ("docs/brand/jacnex-logo.png", "generado/logo.png"),
+        ("docs/brand/jacnex-logo-white.png", "generado/logo-white.png"),
+        ("docs/brand/jacnex-mark.png", "generado/mark.png"),
+        ("docs/brand/jacnex-mark-64.png", "generado/mark-64.png"),
+        ("docs/brand/jacnex-mark-black.png", "generado/mark-black.png"),
+        ("docs/brand/jacnex-mark-black-44.png", "generado/mark-black-44.png"),
+        ("docs/brand/LICENSE-brand.txt", "LICENSE-brand.txt"),
+    ]
+
+
+def copias_icono(stem, id_hicolor, svg, carpeta):
+    """El juego de íconos de una app en assets/app-icon/ (como lo organizan las apps de ArtCraft)."""
+    copias = [
+        (f"assets/app-icon/{stem}.svg", svg),
+        (f"assets/app-icon/{stem}-1024.png", f"generado/{carpeta}/icon-1024.png"),
+        (f"assets/app-icon/{stem}.ico", f"generado/{carpeta}/icon.ico"),
+        (f"assets/app-icon/{stem}.icns", f"generado/{carpeta}/icon.icns"),
+        (f"assets/app-icon/hicolor/scalable/apps/{id_hicolor}.svg", svg),
+    ]
+    for t in TAMANOS_HICOLOR:
+        copias.append((f"assets/app-icon/hicolor/{t}x{t}/apps/{id_hicolor}.png", f"generado/{carpeta}/icon-{t}.png"))
+    return copias

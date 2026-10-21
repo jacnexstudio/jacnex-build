@@ -4,7 +4,9 @@ Convierte las apps de código abierto de [ArtCraft](https://github.com/storytold
 en la suite **Jacnex Studio** y las compila.
 
 - `marca.json`: nombres de Jacnex para el launcher y cada app.
-- `marca/`: logos e íconos (`npm run generar` los regenera desde `marca/svg/`).
+- `marca/`: logos e íconos. `python disenar.py` dibuja los SVG (logo de Jacnex Studio basado en el
+  logo oficial de Jacnex Solutions, e ícono hexagonal de cada app) y `npm run generar` produce los PNG,
+  ICO e ICNS. Las letras usan la fuente Archivo (SIL OFL 1.1, `marca/fuentes/`).
 - `rebrand/`: el cambio de marca. `python rebrand/rebrand.py <proyecto> <carpeta>` reemplaza
   nombres, enlaces e identificadores, cambia logos e íconos y agrega el aviso de modificación al
   `NOTICE`. Las reglas de cada proyecto están en `rebrand/reglas/`.
