@@ -97,10 +97,12 @@ def ajustar_instalador_windows(carpeta, proyecto):
     texto = wxs.read_text(encoding="utf-8")
     texto = re.sub(r'((?:UpgradeCode|Guid)=")([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27})(")',
                    lambda m: m.group(1) + nuevo_guid(proyecto, m.group(2)) + m.group(3), texto)
-    archivos = "".join(
-        f'        <File Id="JacnexLic{i}" Source="$(var.BinDir)\\{n}"{KEYPATH if i == 0 else ""} />\n'
+    # Un componente por archivo: WiX solo genera el Guid solo para componentes de un archivo.
+    componente = "".join(
+        f'      <Component Id="JacnexLicencia{i}" Directory="INSTALLFOLDER">\n'
+        f'        <File Id="JacnexLic{i}" Source="$(var.BinDir)\\{n}"{KEYPATH} />\n'
+        f'      </Component>\n'
         for i, n in enumerate(LICENCIAS))
-    componente = f'      <Component Id="JacnexLicencias" Directory="INSTALLFOLDER">\n{archivos}      </Component>\n'
     if texto.count("</ComponentGroup>") < 1:
         raise ErrorDeParche(f"{wxs}: no se encontró </ComponentGroup>")
     texto = texto.replace("    </ComponentGroup>", componente + "    </ComponentGroup>", 1)
