@@ -17,6 +17,9 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from reglas.comunes import ErrorDeParche  # noqa: E402
+
 RAIZ = Path(__file__).resolve().parent.parent
 MARCA = json.loads((RAIZ / "marca.json").read_text(encoding="utf-8"))
 
@@ -24,10 +27,6 @@ MARCA = json.loads((RAIZ / "marca.json").read_text(encoding="utf-8"))
 PROTEGIDOS = {"LICENSE-MIT", "LICENSE-APACHE", "LICENSE", "NOTICE", "ATTRIBUTION.md"}
 CARPETAS_IGNORADAS = {".git", "target", "node_modules", "dist"}
 RESTOS = re.compile(r"ArtCraft|Artcraft|artcraft|storytold|storyteller|Learning Machines")
-
-
-class ErrorDeParche(Exception):
-    pass
 
 
 def archivos(carpeta):
@@ -135,7 +134,6 @@ def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     proyecto, carpeta = sys.argv[1], Path(sys.argv[2]).resolve()
-    sys.path.insert(0, str(Path(__file__).parent))
     reglas = importlib.import_module(f"reglas.{proyecto}")
 
     print(f"Cambio de marca: {proyecto} en {carpeta}")

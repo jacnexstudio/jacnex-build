@@ -6,6 +6,10 @@ import uuid
 IDENT = r"[A-Za-z0-9_]"
 
 
+class ErrorDeParche(Exception):
+    """El código original cambió y una regla ya no encuentra lo que esperaba."""
+
+
 def ids_apps(marca):
     ids = list(marca["apps"])
     for app in marca["apps"].values():
