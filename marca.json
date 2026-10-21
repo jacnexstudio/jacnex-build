@@ -12,19 +12,60 @@
     "upstream": "storytold/craft-launcher"
   },
   "apps": {
-    "photocraft": { "nombre": "Jacnex Photo", "anteriores": [] },
-    "vectorcraft": { "nombre": "Jacnex Vector", "anteriores": [] },
-    "filmcraft": { "nombre": "Jacnex Film", "anteriores": [] },
-    "lightcraft": { "nombre": "Jacnex Light", "anteriores": [] },
-    "pdfcraft": { "nombre": "Jacnex PDF", "anteriores": ["PrintCraft"] },
-    "effectcraft": { "nombre": "Jacnex Motion", "anteriores": [] },
-    "designcraft": { "nombre": "Jacnex Layout", "anteriores": [] },
-    "figcraft": { "nombre": "Jacnex Proto", "anteriores": [] },
-    "wordcraft": { "nombre": "Jacnex Write", "anteriores": [] },
-    "soundcraft": { "nombre": "Jacnex Sound", "anteriores": [] },
-    "deckcraft": { "nombre": "Jacnex Deck", "anteriores": [] },
-    "cadcraft": { "nombre": "Jacnex CAD", "anteriores": [] },
-    "gridcraft": { "nombre": "Jacnex Grid", "anteriores": [] }
+    "photocraft": {
+      "nombre": "Next Photo",
+      "anteriores": []
+    },
+    "vectorcraft": {
+      "nombre": "Next Vector",
+      "anteriores": []
+    },
+    "filmcraft": {
+      "nombre": "Next Film",
+      "anteriores": []
+    },
+    "lightcraft": {
+      "nombre": "Next Light",
+      "anteriores": []
+    },
+    "pdfcraft": {
+      "nombre": "Next PDF",
+      "anteriores": [
+        "PrintCraft"
+      ]
+    },
+    "effectcraft": {
+      "nombre": "Next Motion",
+      "anteriores": []
+    },
+    "designcraft": {
+      "nombre": "Next Layout",
+      "anteriores": []
+    },
+    "figcraft": {
+      "nombre": "Next Proto",
+      "anteriores": []
+    },
+    "wordcraft": {
+      "nombre": "Next Write",
+      "anteriores": []
+    },
+    "soundcraft": {
+      "nombre": "Next Sound",
+      "anteriores": []
+    },
+    "deckcraft": {
+      "nombre": "Next Deck",
+      "anteriores": []
+    },
+    "cadcraft": {
+      "nombre": "Next CAD",
+      "anteriores": []
+    },
+    "gridcraft": {
+      "nombre": "Next Grid",
+      "anteriores": []
+    }
   },
   "nombres_originales": {
     "photocraft": "PhotoCraft",

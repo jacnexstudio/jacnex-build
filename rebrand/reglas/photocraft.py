@@ -1,4 +1,4 @@
-"""Reglas para PhotoCraft -> Jacnex Photo (storytold/photocraft).
+"""Reglas para PhotoCraft -> Next Photo (storytold/photocraft).
 
 Los íconos de la app (assets/app-icon) tienen la misma licencia que el código, así que se conservan;
 solo se reemplazan los logos de ArtCraft (docs/brand), que no son libres.
