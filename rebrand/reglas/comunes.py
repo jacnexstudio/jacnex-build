@@ -77,16 +77,50 @@ def nuevo_guid(proyecto, guid):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://jacnex.com/{proyecto}/{guid.upper()}")).upper()
 
 
-def cambiar_upgrade_codes(carpeta, proyecto):
-    """Un instalador de Jacnex no debe reemplazar ni chocar con el original de ArtCraft instalado."""
-    cambiados = 0
-    for wxs in carpeta.rglob("*.wxs"):
-        texto = wxs.read_text(encoding="utf-8")
-        nuevo = re.sub(r'(UpgradeCode=")([0-9A-Fa-f-]{36})(")', lambda m: m.group(1) + nuevo_guid(proyecto, m.group(2)) + m.group(3), texto)
-        if nuevo != texto:
-            wxs.write_text(nuevo, encoding="utf-8", newline="")
-            cambiados += 1
-    return cambiados
+LICENCIAS = ("NOTICE", "LICENSE-MIT", "LICENSE-APACHE", "ATTRIBUTION.md")
+KEYPATH = ' KeyPath="yes"'
+
+
+def ajustar_instalador_windows(carpeta, proyecto):
+    """Prepara el instalador de Windows (WiX) y el paquete portable de una app.
+
+    - Identificadores propios (UpgradeCode y Guid de componentes): un producto de Jacnex no debe
+      reemplazar ni confundirse con el original de ArtCraft si ambos están instalados.
+    - NOTICE, licencias y atribuciones dentro del MSI y del zip portable, como exige la licencia.
+    """
+    windows = carpeta / "packaging" / "windows"
+    wxs_lista = list(windows.glob("*.wxs"))
+    if len(wxs_lista) != 1 or not (windows / "package.ps1").exists():
+        raise ErrorDeParche(f"se esperaba un .wxs y package.ps1 en {windows}")
+    wxs, ps1 = wxs_lista[0], windows / "package.ps1"
+
+    texto = wxs.read_text(encoding="utf-8")
+    texto = re.sub(r'((?:UpgradeCode|Guid)=")([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27})(")',
+                   lambda m: m.group(1) + nuevo_guid(proyecto, m.group(2)) + m.group(3), texto)
+    archivos = "".join(
+        f'        <File Id="JacnexLic{i}" Source="$(var.BinDir)\\{n}"{KEYPATH if i == 0 else ""} />\n'
+        for i, n in enumerate(LICENCIAS))
+    componente = f'      <Component Id="JacnexLicencias" Directory="INSTALLFOLDER">\n{archivos}      </Component>\n'
+    if texto.count("</ComponentGroup>") < 1:
+        raise ErrorDeParche(f"{wxs}: no se encontró </ComponentGroup>")
+    texto = texto.replace("    </ComponentGroup>", componente + "    </ComponentGroup>", 1)
+    wxs.write_text(texto, encoding="utf-8", newline="")
+
+    script = ps1.read_text(encoding="utf-8")
+    copia_bin = re.search(r"^Copy-Item \(Join-Path \$Bin .*\$Stage[ \t]*$", script, flags=re.M)
+    if not copia_bin:
+        raise ErrorDeParche(f"{ps1}: no se encontró la copia de binarios a $Stage")
+    lista = ", ".join(f"'{n}'" for n in LICENCIAS)
+    linea = f"\nforeach ($f in {lista}) {{ Copy-Item (Join-Path $Root $f) $Stage }}"
+    script = script[:copia_bin.end()] + linea + script[copia_bin.end():]
+    # Paquete portable: agrega NOTICE y ATTRIBUTION.md a la lista de archivos si faltan.
+    script, n = re.subn(r"foreach \(\$f in ('README\.md'[^)]*)\)",
+                        lambda m: "foreach ($f in " + m.group(1) + "".join(
+                            f", '{x}'" for x in ("NOTICE", "ATTRIBUTION.md") if f"'{x}'" not in m.group(1)) + ")",
+                        script)
+    if n < 1:
+        raise ErrorDeParche(f"{ps1}: no se encontró la lista de archivos del paquete portable")
+    ps1.write_text(script, encoding="utf-8", newline="")
 
 
 TAMANOS_HICOLOR = (16, 24, 32, 48, 64, 128, 256, 512)

@@ -38,5 +38,4 @@ def copias_de_marca(marca):
 
 
 def parches(carpeta, marca, parche):
-    if comunes.cambiar_upgrade_codes(carpeta, APP) != 1:
-        raise comunes.ErrorDeParche("se esperaba un instalador .wxs con UpgradeCode")
+    comunes.ajustar_instalador_windows(carpeta, APP)

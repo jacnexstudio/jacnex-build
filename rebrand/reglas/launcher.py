@@ -48,4 +48,4 @@ def parches(carpeta, marca, parche):
     parche(carpeta / "crates/core/src/catalog.rs",
            r"pub const SOCIAL: \[\(&str, &str\); \d+\] = \[.*?\];",
            "pub const SOCIAL: [(&str, &str); 0] = [];", regex=True)
-    comunes.cambiar_upgrade_codes(carpeta, "launcher")
+    comunes.ajustar_instalador_windows(carpeta, "launcher")
