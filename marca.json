@@ -4,7 +4,7 @@
   "soporte": "https://jacnex.com/soporte",
   "github": "jacnexstudio",
   "prefijo_id": "com.jacnex",
-  "suite": "Next Suite",
+  "suite": "Jacnex Suite",
   "launcher": {
     "nombre": "Jacnex Studio",
     "id": "jacnex-studio",
@@ -13,57 +13,58 @@
   },
   "apps": {
     "photocraft": {
-      "nombre": "Next Photo",
+      "nombre": "Photonex",
       "anteriores": []
     },
     "vectorcraft": {
-      "nombre": "Next Vector",
+      "nombre": "Vectornex",
       "anteriores": []
     },
     "filmcraft": {
-      "nombre": "Next Film",
+      "nombre": "Filmnex",
       "anteriores": []
     },
     "lightcraft": {
-      "nombre": "Next Light",
+      "nombre": "Lightnex",
       "anteriores": []
     },
     "pdfcraft": {
-      "nombre": "Next PDF",
+      "nombre": "Readnex",
       "anteriores": [
         "PrintCraft"
       ]
     },
     "effectcraft": {
-      "nombre": "Next Motion",
+      "nombre": "Motionex",
       "anteriores": []
     },
     "designcraft": {
-      "nombre": "Next Layout",
+      "nombre": "Layoutnex",
       "anteriores": []
     },
     "figcraft": {
-      "nombre": "Next Proto",
+      "nombre": "Protonex",
       "anteriores": []
     },
     "wordcraft": {
-      "nombre": "Next Write",
+      "nombre": "Writenex",
       "anteriores": []
     },
     "soundcraft": {
-      "nombre": "Next Sound",
+      "nombre": "Soundnex",
       "anteriores": []
     },
     "deckcraft": {
-      "nombre": "Next Deck",
+      "nombre": "Decknex",
       "anteriores": []
     },
     "cadcraft": {
-      "nombre": "Next CAD",
-      "anteriores": []
+      "nombre": "CADnex",
+      "anteriores": [],
+      "excluida": true
     },
     "gridcraft": {
-      "nombre": "Next Grid",
+      "nombre": "Gridnex",
       "anteriores": []
     }
   },

@@ -48,4 +48,13 @@ def parches(carpeta, marca, parche):
     parche(carpeta / "crates/core/src/catalog.rs",
            r"pub const SOCIAL: \[\(&str, &str\); \d+\] = \[.*?\];",
            "pub const SOCIAL: [(&str, &str); 0] = [];", regex=True)
+
+    # Apps que Jacnex no ofrece (marca.json: "excluida"): se quitan del catálogo del launcher.
+    catalogo = carpeta / "crates/core/src/catalog.rs"
+    excluidas = [app for app, datos in marca["apps"].items() if datos.get("excluida")]
+    for app in excluidas:
+        parche(catalogo, rf'\n    app\(\s*"{app}",.*?"[^"]*/{app}",\s*\),', "", regex=True)
+    if excluidas:
+        parche(catalogo, r"pub const SUITE: \[CraftApp; \d+\]",
+               f"pub const SUITE: [CraftApp; {len(marca['apps']) - len(excluidas)}]", regex=True)
     comunes.ajustar_instalador_windows(carpeta, "launcher")
