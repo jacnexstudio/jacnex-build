@@ -82,6 +82,23 @@ jobs:
           DIST: ${{ github.workspace }}/dist
         run: pwsh packaging/windows/package.ps1 -Arch x64
 
+      # Solo el launcher: el instalador .exe que se descarga desde jacnex.com. Lleva un nombre sin
+      # versión para que el enlace releases/latest/download/JacnexStudio-Setup.exe no cambie.
+      - name: Instalador .exe (Inno Setup)
+        if: inputs.proyecto == 'launcher'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'No se pudo instalar Inno Setup' }
+          }
+          $version = '${{ steps.version.outputs.ref }}'.TrimStart('v')
+          $msi = Get-ChildItem dist -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw 'No hay MSI en dist' }
+          & $iscc /Q "/DVersion=$version" "/DMsi=$($msi.FullName)" "/O$env:GITHUB_WORKSPACE\dist" jb\instalador\jacnex-studio.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup falló ($LASTEXITCODE)" }
+
       - name: Huellas SHA-256
         shell: pwsh
         working-directory: dist

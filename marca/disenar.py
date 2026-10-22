@@ -164,6 +164,18 @@ def main():
     (SALIDA / "mark-black.svg").write_text(
         svg("0 0 100 100", f'<path fill-rule="evenodd" fill="#000" d="{HEX}{CHEVRON}"/>'), encoding="utf-8")
 
+    # Imágenes del instalador (Inno Setup): franja lateral en marino con el logo, y el ícono.
+    d_jw, a_jw = negrita.trazo("JACNEX", 21, y_base=0, espaciado=1)
+    d_sw, a_sw = fina.trazo("STUDIO", 7.5, y_base=0, espaciado=6.5)
+    lateral = (
+        f'<rect width="164" height="314" fill="{MARINO}"/>'
+        + marca_jacnex(x=(164 - 0.62 * 91.8) / 2 - 0.62 * 4.1, y=96, escala=0.62)
+        + f'<g transform="translate({(164 - a_jw) / 2:.2f} 192)"><path d="{d_jw}" fill="#FFFFFF"/></g>'
+        + f'<g transform="translate({(164 - a_sw) / 2:.2f} 210)"><path d="{d_sw}" fill="{AZUL_OSCURO_TEMA}"/></g>'
+    )
+    (SALIDA / "instalador-lateral.svg").write_text(svg("0 0 164 314", lateral), encoding="utf-8")
+    (SALIDA / "instalador-icono.svg").write_text(svg("-6 -6 112 112", '<rect x="-6" y="-6" width="112" height="112" fill="#FFFFFF"/>' + marca_jacnex()), encoding="utf-8")
+
     for app_id in SIMBOLOS:
         (SALIDA / "apps" / f"{app_id}.svg").write_text(icono_app(app_id), encoding="utf-8")
     print(f"SVG escritos en {SALIDA} ({len(SIMBOLOS)} íconos de apps)")
