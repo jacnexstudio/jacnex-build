@@ -14,6 +14,7 @@ import importlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -99,6 +100,26 @@ def parche(ruta, buscar, reemplazo, regex=False, conteo=1):
     ruta.write_text(nuevo, encoding="utf-8", newline="")
 
 
+def aplicar_diseno(carpeta, proyecto):
+    """Aplica los parches de diseño de parches/<proyecto>/*.patch (git diff), en orden de nombre.
+
+    Se generan desde una copia de trabajo ya con el cambio de marca, así que se aplican después de
+    él. Si ArtCraft cambió el código que un parche toca, git lo rechaza y la compilación se detiene.
+    """
+    carpeta_parches = RAIZ / "parches" / proyecto
+    if not carpeta_parches.is_dir():
+        return 0
+    lista = sorted(carpeta_parches.glob("*.patch"))
+    for archivo in lista:
+        resultado = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", "--ignore-whitespace", str(archivo)],
+            cwd=carpeta, capture_output=True, text=True,
+        )
+        if resultado.returncode != 0:
+            raise ErrorDeParche(f"el parche {archivo.name} no se pudo aplicar:\n{resultado.stderr.strip()}")
+    return len(lista)
+
+
 def avisar_modificacion(carpeta, nombre):
     notice = carpeta / "NOTICE"
     if notice.exists():
@@ -110,6 +131,11 @@ def avisar_modificacion(carpeta, nombre):
             f"{MARCA['empresa']} is not affiliated with or endorsed by the ArtCraft Team. The list of changes is in\n"
             f"https://github.com/{MARCA['github']}/jacnex-build (rebrand/).\n"
         )
+        if (carpeta / "assets" / "fonts" / "OFL-PlusJakartaSans.txt").exists():
+            texto += (
+                "\nPlus Jakarta Sans font (assets/fonts/PlusJakartaSans-Variable.ttf), added by Jacnex — SIL Open\n"
+                "Font License 1.1. See assets/fonts/OFL-PlusJakartaSans.txt.\n"
+            )
         notice.write_text(texto, encoding="utf-8", newline="")
 
 
@@ -147,6 +173,9 @@ def main():
     print(f"  {copiar_marca(carpeta, reglas.copias_de_marca(MARCA))} archivos de marca copiados")
     reglas.parches(carpeta, MARCA, parche)
     print("  parches aplicados")
+    aplicados = aplicar_diseno(carpeta, proyecto)
+    if aplicados:
+        print(f"  diseño de Jacnex aplicado ({aplicados} parches)")
     avisar_modificacion(carpeta, reglas.nombre_producto(MARCA))
 
     quedan = restos(carpeta)
