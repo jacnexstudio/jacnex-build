@@ -1,0 +1,69 @@
+# Revisa si ArtCraft publicó una versión nueva de una app y, si la hay, la compila con la marca
+# Jacnex y la publica. Lo llaman los repositorios de cada app todos los días (y a mano).
+
+name: Actualizar
+
+on:
+  workflow_call:
+    inputs:
+      proyecto:
+        type: string
+        required: true
+      upstream:
+        type: string
+        required: true
+      nombre:
+        type: string
+        required: true
+      ref:
+        description: "Versión original a compilar. Vacío: la última publicada."
+        type: string
+        default: ""
+      publicar:
+        type: boolean
+        default: true
+      forzar:
+        description: "Compilar aunque ya esté publicada (ejecución manual)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    outputs:
+      compilar: ${{ steps.revisar.outputs.compilar }}
+      ref: ${{ steps.revisar.outputs.ref }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Comparar con la versión original
+        id: revisar
+        run: |
+          original="${{ inputs.ref }}"
+          if [ -z "$original" ]; then
+            original=$(gh release view --repo '${{ inputs.upstream }}' --json tagName --jq .tagName)
+          fi
+          publicada=$(gh release view --repo '${{ github.repository }}' --json tagName --jq .tagName 2>/dev/null || echo "ninguna")
+          echo "Original: $original · Publicada en Jacnex: $publicada"
+          echo "ref=$original" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.forzar }}" = "true" ] || [ "$original" != "$publicada" ]; then
+            echo "compilar=true" >> "$GITHUB_OUTPUT"
+            echo "### ${{ inputs.nombre }}: se compila $original (publicada: $publicada)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "compilar=false" >> "$GITHUB_OUTPUT"
+            echo "### ${{ inputs.nombre }}: al día ($publicada)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  compilar:
+    needs: revisar
+    if: needs.revisar.outputs.compilar == 'true'
+    uses: jacnexstudio/jacnex-build/.github/workflows/compilar-windows.yml@main
+    with:
+      proyecto: ${{ inputs.proyecto }}
+      upstream: ${{ inputs.upstream }}
+      nombre: ${{ inputs.nombre }}
+      ref: ${{ needs.revisar.outputs.ref }}
+      publicar: ${{ inputs.publicar }}
