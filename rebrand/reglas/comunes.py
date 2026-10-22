@@ -81,6 +81,30 @@ def nuevo_guid(proyecto, guid):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://jacnex.com/{proyecto}/{guid.upper()}")).upper()
 
 
+GUID = re.compile(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b")
+
+
+def renovar_guids(carpeta_windows, proyecto):
+    """Cambia todos los GUID de los archivos del instalador por otros propios y estables.
+
+    El mismo GUID original da siempre el mismo nuevo en todos los archivos, así los scripts que lo
+    verifican (como test-msi.ps1) siguen coincidiendo con el .wxs.
+    """
+    def reemplazo(m):
+        original, nuevo = m.group(0), nuevo_guid(proyecto, m.group(0))
+        return nuevo.lower() if original == original.lower() else nuevo
+
+    for archivo in carpeta_windows.iterdir():
+        if archivo.suffix.lower() not in (".wxs", ".wxi", ".wxl", ".ps1"):
+            continue
+        datos = archivo.read_bytes()
+        bom = datos.startswith(b"\xef\xbb\xbf")
+        texto = datos.decode("utf-8-sig")
+        nuevo = GUID.sub(reemplazo, texto)
+        if nuevo != texto:
+            archivo.write_bytes((b"\xef\xbb\xbf" if bom else b"") + nuevo.encode("utf-8"))
+
+
 LICENCIAS = ("NOTICE", "LICENSE-MIT", "LICENSE-APACHE", "ATTRIBUTION.md", "ASSETS.md")
 KEYPATH = ' KeyPath="yes"'
 
@@ -101,10 +125,15 @@ def ajustar_instalador_windows(carpeta, proyecto):
         raise ErrorDeParche(f"no se encontró el instalador .wxs o package.ps1 en {windows}")
 
     texto = wxs.read_text(encoding="utf-8")
-    texto = re.sub(r'((?:UpgradeCode|Guid)=")([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27})(")',
-                   lambda m: m.group(1) + nuevo_guid(proyecto, m.group(2)) + m.group(3), texto)
+    renovar_guids(windows, proyecto)
+    texto = wxs.read_text(encoding="utf-8")
     # Solo las licencias que existen y que el instalador no incluye ya (algunas apps ya las traen).
-    licencias = [n for n in LICENCIAS if (carpeta / n).exists() and f'\\{n}"' not in texto]
+    # Si el instalador ya empaca una carpeta entera (p. ej. docs/ con las licencias, como VectorCraft),
+    # no se agrega nada: WiX rechaza archivos repetidos.
+    if "<Files Include=" in texto:
+        licencias = []
+    else:
+        licencias = [n for n in LICENCIAS if (carpeta / n).exists() and f'\\{n}"' not in texto]
     # Un componente por archivo: WiX solo genera el Guid solo para componentes de un archivo.
     componente = "".join(
         f'      <Component Id="JacnexLicencia{i}" Directory="INSTALLFOLDER">\n'
