@@ -38,6 +38,8 @@ def copias_de_marca(marca):
     return [
         *comunes.copias_logos(),
         *comunes.copias_icono(lid, f"{marca['prefijo_id']}.{lid}", "svg/mark.svg", "launcher"),
+        # El ícono de la comunidad (antes Discord) es el de WhatsApp.
+        ("assets/social/discord.svg", "svg/whatsapp.svg"),
         # Íconos de cada app en el catálogo del launcher.
         *[(f"assets/app-icons/{app}.png", f"generado/apps/{app}/icon-128.png") for app in marca["apps"]],
     ]

@@ -19,7 +19,7 @@ def ids_apps(marca):
 
 def urls_y_repos(marca):
     """Direcciones web, repositorios e identificadores de ArtCraft que pasan a ser de Jacnex."""
-    gh, web, soporte = marca["github"], marca["web"], marca["soporte"]
+    gh, web = marca["github"], marca["web"]
     return [
         (r"https://(?:www\.)?getartcraft\.com", web),
         (r"(?:www\.)?getartcraft\.com", web.removeprefix("https://")),
@@ -39,19 +39,31 @@ def urls_y_repos(marca):
         (r"[\w.+-]+@storyteller\.ai", f"soporte@{web.removeprefix('https://')}"),
         (r"ai\.storyteller\.", f"{marca['prefijo_id']}."),
         (r'"ai\.storyteller"', f'"{marca["prefijo_id"]}"'),
-        (r"https://discord\.gg/artcraft", soporte),
-        (r"discord://-/invite/artcraft", soporte),
+        # La comunidad de Jacnex es un grupo de WhatsApp; jacnex.com/whatsapp redirige a la invitación
+        # vigente, así se puede cambiar de grupo sin recompilar las apps.
+        (r"https?://(?:www\.)?discord\.(?:gg|com/invite)/artcraft", marca["whatsapp"]),
+        (r"discord://-/invite/artcraft", marca["whatsapp"]),
+        (r"discord\.gg/artcraft", marca["whatsapp"].removeprefix("https://")),
         (r"Learning Machines (?:LLC|Inc\.?)", marca["empresa"]),
     ]
 
 
 def comunidad():
-    """ArtCraft invita a su Discord; Jacnex ofrece su página de soporte."""
+    """ArtCraft invita a su Discord; Jacnex, a su grupo de WhatsApp.
+
+    Primero las frases completas (en inglés, que es la clave de las traducciones, y en español);
+    después la palabra suelta. "Discord" solo aparece en textos y comentarios, nunca como nombre
+    de código, así que el cambio no rompe la compilación.
+    """
     return [
-        (r"Join the ArtCraft community on Discord", "Get help from the Jacnex team"),
-        (r"Únete a la comunidad de ArtCraft en Discord", "Recibe ayuda del equipo de Jacnex"),
-        (r"Join the ArtCraft Discord(…|\.\.\.)?", r"Jacnex help and support\1"),
-        (r"Únete al Discord de ArtCraft(…|\.\.\.)?", r"Ayuda y soporte de Jacnex\1"),
+        (r"Join the ArtCraft community on Discord", "Join the Jacnex community on WhatsApp"),
+        (r"Únete a la comunidad de ArtCraft en Discord", "Únete a la comunidad de Jacnex en WhatsApp"),
+        (r"Join the ArtCraft Discord(…|\.\.\.)?", r"Join the Jacnex WhatsApp group\1"),
+        (r"Únete al Discord de ArtCraft(…|\.\.\.)?", r"Únete al grupo de WhatsApp de Jacnex\1"),
+        (rf"(?<!{IDENT})Discord(?!{IDENT})", "WhatsApp"),
+        (rf"(?<!{IDENT})DISCORD(?!{IDENT})", "WHATSAPP"),
+        # Formas declinadas en otras traducciones (Discordu, Discordzie, Discordhoz...).
+        (rf"(?<!{IDENT})Discord[a-zà-ÿą-ž]+(?![A-Za-z0-9_])", "WhatsApp"),
     ]
 
 
