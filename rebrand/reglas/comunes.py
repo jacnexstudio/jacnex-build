@@ -26,7 +26,9 @@ def urls_y_repos(marca):
         (r"raw\.githubusercontent\.com/storytold/craft-launcher-assets", f"raw.githubusercontent.com/{gh}/jacnex-assets"),
         (r"storytold/craft-launcher-assets", f"{gh}/jacnex-assets"),
         (r"storytold/craft-launcher\b", f"{gh}/{marca['launcher']['repo']}"),
-        (rf"storytold/({ids_apps(marca)})\b", rf"{gh}/\1"),
+        # Los enlaces a las apps pasan a Jacnex, pero no las dependencias de código (git = "..." en
+        # Cargo.toml y git+https://... en Cargo.lock), que deben seguir bajando el código original.
+        (rf'(?<!git = "https://github\.com/)(?<!git\+https://github\.com/)storytold/({ids_apps(marca)})\b', rf"{gh}/\1"),
         (r'(GITHUB_OWNER: &str = )"storytold"', rf'\1"{gh}"'),
         (r'"https://github\.com/storytold"', f'"https://github.com/{gh}"'),
         # Enlaces armados en el código: format!("https://github.com/storytold/{app}")
@@ -79,7 +81,7 @@ def nuevo_guid(proyecto, guid):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://jacnex.com/{proyecto}/{guid.upper()}")).upper()
 
 
-LICENCIAS = ("NOTICE", "LICENSE-MIT", "LICENSE-APACHE", "ATTRIBUTION.md")
+LICENCIAS = ("NOTICE", "LICENSE-MIT", "LICENSE-APACHE", "ATTRIBUTION.md", "ASSETS.md")
 KEYPATH = ' KeyPath="yes"'
 
 
@@ -101,12 +103,14 @@ def ajustar_instalador_windows(carpeta, proyecto):
     texto = wxs.read_text(encoding="utf-8")
     texto = re.sub(r'((?:UpgradeCode|Guid)=")([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27})(")',
                    lambda m: m.group(1) + nuevo_guid(proyecto, m.group(2)) + m.group(3), texto)
+    # Solo las licencias que existen y que el instalador no incluye ya (algunas apps ya las traen).
+    licencias = [n for n in LICENCIAS if (carpeta / n).exists() and f'\\{n}"' not in texto]
     # Un componente por archivo: WiX solo genera el Guid solo para componentes de un archivo.
     componente = "".join(
         f'      <Component Id="JacnexLicencia{i}" Directory="INSTALLFOLDER">\n'
         f'        <File Id="JacnexLic{i}" Source="$(var.BinDir)\\{n}"{KEYPATH} />\n'
         f'      </Component>\n'
-        for i, n in enumerate(LICENCIAS))
+        for i, n in enumerate(licencias))
     if texto.count("</ComponentGroup>") < 1:
         raise ErrorDeParche(f"{wxs}: no se encontró </ComponentGroup>")
     texto = texto.replace("    </ComponentGroup>", componente + "    </ComponentGroup>", 1)
@@ -116,7 +120,7 @@ def ajustar_instalador_windows(carpeta, proyecto):
     copia_bin = re.search(r"^Copy-Item \(Join-Path \$Bin .*\$Stage[ \t]*$", script, flags=re.M)
     if not copia_bin:
         raise ErrorDeParche(f"{ps1}: no se encontró la copia de binarios a $Stage")
-    lista = ", ".join(f"'{n}'" for n in LICENCIAS)
+    lista = ", ".join(f"'{n}'" for n in LICENCIAS if (carpeta / n).exists())
     linea = f"\nforeach ($f in {lista}) {{ Copy-Item (Join-Path $Root $f) $Stage }}"
     script = script[:copia_bin.end()] + linea + script[copia_bin.end():]
     # Paquete portable: agrega NOTICE y ATTRIBUTION.md a la lista de archivos si faltan.
