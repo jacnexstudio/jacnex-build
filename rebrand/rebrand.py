@@ -2,7 +2,7 @@
 """Convierte el código de una app de ArtCraft en su versión Jacnex.
 
 Uso:  python rebrand/rebrand.py <proyecto> <carpeta-del-codigo>
-      (proyecto = launcher | photocraft | ...)
+      (proyecto = launcher, o el id de una app de marca.json: photocraft, lightcraft, ...)
 
 Pasos: reemplaza textos, renombra archivos, copia la marca de Jacnex, aplica parches puntuales y
 agrega el aviso de modificación al NOTICE. Al final lista lo que quedó con nombres de ArtCraft
@@ -134,7 +134,12 @@ def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     proyecto, carpeta = sys.argv[1], Path(sys.argv[2]).resolve()
-    reglas = importlib.import_module(f"reglas.{proyecto}")
+    try:
+        reglas = importlib.import_module(f"reglas.{proyecto}")
+    except ModuleNotFoundError:
+        if proyecto not in MARCA["apps"]:
+            sys.exit(f"No hay reglas para {proyecto!r} y no es una app de marca.json")
+        reglas = importlib.import_module("reglas.app_generica").crear(proyecto)
 
     print(f"Cambio de marca: {proyecto} en {carpeta}")
     print(f"  textos cambiados en {reemplazar_textos(carpeta, compilar(reglas.textos(MARCA)))} archivos")

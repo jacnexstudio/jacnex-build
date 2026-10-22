@@ -29,6 +29,8 @@ def urls_y_repos(marca):
         (rf"storytold/({ids_apps(marca)})\b", rf"{gh}/\1"),
         (r'(GITHUB_OWNER: &str = )"storytold"', rf'\1"{gh}"'),
         (r'"https://github\.com/storytold"', f'"https://github.com/{gh}"'),
+        # Enlaces armados en el código: format!("https://github.com/storytold/{app}")
+        (r"https://github\.com/storytold/\{", f"https://github.com/{gh}/{{"),
         # El launcher pregunta las versiones a un servidor de ArtCraft; el de Jacnex vive en su web
         # (si no responde, el launcher consulta GitHub directamente).
         (r"https://api\.storyteller\.ai/v1/craft_apps/release_info", f"{web}/api/suite/release_info"),
@@ -89,10 +91,12 @@ def ajustar_instalador_windows(carpeta, proyecto):
     - NOTICE, licencias y atribuciones dentro del MSI y del zip portable, como exige la licencia.
     """
     windows = carpeta / "packaging" / "windows"
+    # El instalador principal se llama como la app; algunas tienen además installer-ui.wxs.
     wxs_lista = list(windows.glob("*.wxs"))
-    if len(wxs_lista) != 1 or not (windows / "package.ps1").exists():
-        raise ErrorDeParche(f"se esperaba un .wxs y package.ps1 en {windows}")
-    wxs, ps1 = wxs_lista[0], windows / "package.ps1"
+    wxs = windows / f"{proyecto}.wxs" if len(wxs_lista) > 1 else (wxs_lista[0] if wxs_lista else None)
+    ps1 = windows / "package.ps1"
+    if wxs is None or not wxs.exists() or not ps1.exists():
+        raise ErrorDeParche(f"no se encontró el instalador .wxs o package.ps1 en {windows}")
 
     texto = wxs.read_text(encoding="utf-8")
     texto = re.sub(r'((?:UpgradeCode|Guid)=")([0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27})(")',
