@@ -4,8 +4,9 @@
 Uso:  python rebrand/rebrand.py <proyecto> <carpeta-del-codigo>
       (proyecto = launcher, o el id de una app de marca.json: photocraft, lightcraft, ...)
 
-Pasos: reemplaza textos, renombra archivos, copia la marca de Jacnex, aplica parches puntuales y
-agrega el aviso de modificación al NOTICE. Al final lista lo que quedó con nombres de ArtCraft
+Pasos: reemplaza textos, renombra archivos, copia la marca de Jacnex, aplica parches puntuales, la
+identidad visual de Jacnex en las apps (identidad.py) y agrega el aviso de modificación al NOTICE.
+Al final lista lo que quedó con nombres de ArtCraft
 para revisarlo. Si un parche no encuentra lo que espera (porque ArtCraft cambió su código), se
 detiene con un error en lugar de producir una versión a medias.
 """
@@ -20,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from reglas.comunes import ErrorDeParche  # noqa: E402
+import identidad  # noqa: E402
 
 RAIZ = Path(__file__).resolve().parent.parent
 MARCA = json.loads((RAIZ / "marca.json").read_text(encoding="utf-8"))
@@ -173,6 +175,9 @@ def main():
     print(f"  {copiar_marca(carpeta, reglas.copias_de_marca(MARCA))} archivos de marca copiados")
     reglas.parches(carpeta, MARCA, parche)
     print("  parches aplicados")
+    if proyecto != "launcher":
+        resumen = identidad.aplicar(carpeta, proyecto)
+        print("  identidad Jacnex: " + ", ".join(f"{k} {v}" for k, v in resumen.items()))
     aplicados = aplicar_diseno(carpeta, proyecto)
     if aplicados:
         print(f"  diseño de Jacnex aplicado ({aplicados} parches)")
