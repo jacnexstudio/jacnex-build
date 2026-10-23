@@ -1,0 +1,97 @@
+diff --git a/crates/native/src/install.rs b/crates/native/src/install.rs
+index 49ed55e..c8b1f9a 100644
+--- a/crates/native/src/install.rs
++++ b/crates/native/src/install.rs
+@@ -1440,7 +1440,8 @@ mod freebsd {
+ fn msi_command(program: &Path, msi: &Path) -> Result<std::process::Command, String> {
+     let msi = msi_path(msi)?;
+     let mut command = process::command(program);
+-    command.arg("/i").arg(msi).args(["/passive", "/norestart"]);
++    // Silent (/qn): the launcher shows the progress itself, without Windows Installer's window.
++    command.arg("/i").arg(msi).args(["/qn", "/norestart"]);
+     Ok(command)
+ }
+ 
+@@ -1477,16 +1478,37 @@ pub mod windows {
+         }
+     }
+ 
+-    /// Runs an MSI with a progress window and no restart. Windows asks for permission itself.
++    /// Runs msiexec with `command`'s arguments (plus `extra`, passed as written) with
++    /// administrator rights: the apps install for every user, in Program Files. Windows asks for
++    /// permission (its UAC prompt) and nothing else shows; declining reads as cancelled (1602).
++    fn elevated(command: &std::process::Command, extra: Option<String>) -> Result<Option<i32>, String> {
++        let mut line: Vec<String> = command
++            .get_args()
++            .map(|a| {
++                let a = a.to_string_lossy();
++                if a.contains(char::is_whitespace) { format!("\"{a}\"") } else { a.into_owned() }
++            })
++            .collect();
++        line.extend(extra);
++        let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
++        let script = format!(
++            "try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop; exit $p.ExitCode }} catch {{ exit 1602 }}",
++            quote(&msiexec().to_string_lossy()),
++            quote(&line.join(" "))
++        );
++        let status = process::command("powershell.exe")
++            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", &script])
++            .status()
++            .map_err(|e| format!("couldn't start the Windows Installer ({e})"))?;
++        Ok(status.code())
++    }
++
++    /// Installs an MSI silently, with no restart; the launcher shows the progress.
+     pub fn run_msi(msi: &Path, destination: Option<&Path>, stop: &Stop, phase: &mut dyn FnMut(JobPhase)) -> Result<(), String> {
+         in_turn(stop, phase, JobPhase::Installing, || {
+-            use std::os::windows::process::CommandExt;
+-            let mut command = msi_command(&msiexec(), msi)?;
+-            if let Some(dir) = destination {
+-                command.raw_arg(msi_folder_argument(dir)?);
+-            }
+-            let status = command.status().map_err(|e| format!("couldn't start the Windows Installer ({e})"))?;
+-            explain(status.code())
++            let command = msi_command(&msiexec(), msi)?;
++            let extra = destination.map(msi_folder_argument).transpose()?;
++            explain(elevated(&command, extra)?)
+         })
+     }
+ 
+@@ -1503,11 +1525,9 @@ pub mod windows {
+         }
+         in_turn(stop, phase, JobPhase::Removing, || {
+             for m in installs {
+-                let status = process::command(msiexec())
+-                    .args(["/x", &m.product_code, "/passive", "/norestart"])
+-                    .status()
+-                    .map_err(|e| format!("couldn't start the Windows Installer ({e})"))?;
+-                explain(status.code())?;
++                let mut command = process::command(msiexec());
++                command.args(["/x", &m.product_code, "/qn", "/norestart"]);
++                explain(elevated(&command, None)?)?;
+             }
+             Ok(())
+         })
+@@ -1535,7 +1555,7 @@ mod tests {
+             [
+                 std::ffi::OsStr::new("/i"),
+                 file.canonicalize().unwrap().as_os_str(),
+-                std::ffi::OsStr::new("/passive"),
++                std::ffi::OsStr::new("/qn"),
+                 std::ffi::OsStr::new("/norestart")
+             ]
+         );
+diff --git a/crates/native/src/self_update.rs b/crates/native/src/self_update.rs
+index bd4a1ca..9e88e0a 100644
+--- a/crates/native/src/self_update.rs
++++ b/crates/native/src/self_update.rs
+@@ -416,7 +416,7 @@ fn ps_quote_arg(path: &Path) -> String {
+ fn msi_update_step(file: &Path) -> Result<String, String> {
+     let file = install::msi_path(file)?;
+     Ok(format!(
+-        "Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\msiexec.exe') -ArgumentList '/i',{},'/passive','/norestart' -Wait; Remove-Item -LiteralPath {} -ErrorAction SilentlyContinue",
++        "Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\msiexec.exe') -ArgumentList '/i',{},'/qn','/norestart' -Wait; Remove-Item -LiteralPath {} -ErrorAction SilentlyContinue",
+         ps_quote_arg(&file),
+         ps_quote(&file)
+     ))
