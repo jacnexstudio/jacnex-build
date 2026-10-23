@@ -122,11 +122,30 @@ def instalacion_como_adobe(carpeta, parche):
     instalar = carpeta / "crates/native/src/install.rs"
     parche(instalar,
            r"(crate::portable::install\(app, .*?\}\)\s*)\.map\(Some\)",
-           "\g<1>.map(|record| {\n                crate::jacnex_accesos::crear(app, &record.path);\n                Some(record)\n            })",
+           r"\g<1>.map(|record| {" "\n"
+           r"                crate::jacnex_accesos::crear(app, &record.path);" "\n"
+           r"                Some(record)" "\n"
+           r"            })",
            regex=True)
     parche(instalar,
            r"crate::portable::remove\(app, (record\.ok_or\([^;]*?\)\?)\)",
-           "crate::portable::remove(app, \g<1>).inspect(|()| crate::jacnex_accesos::borrar(app))",
+           r"crate::portable::remove(app, \g<1>).inspect(|()| crate::jacnex_accesos::borrar(app))",
+           regex=True)
+    # Siempre así en Windows, como Adobe: sin la opción "Instalar apps nuevas como" (al abrir
+    # Configuración guardaba "MSI" aunque nadie lo eligiera) y sin hacer caso a esa preferencia.
+    # Las apps ya instaladas con el MSI se siguen actualizando con el MSI.
+    parche(instalar,
+           r"(pub fn choose_kinds\(app: &CraftApp, existing: Option<&Installed>, record: Option<&Record>, "
+           r"preferred: &\[PackageKind\]\) -> Vec<PackageKind> \{\n)",
+           r"\g<1>    #[cfg(windows)]" "\n"
+           r"    let preferred: &[PackageKind] = {" "\n"
+           r"        let _ = preferred;" "\n"
+           r"        &[]" "\n"
+           r"    };" "\n",
+           regex=True)
+    parche(carpeta / "crates/ui-egui/src/settings_dialog.rs",
+           r'if self\.platform\.is_some_and\(\|p\| p\.os == Os::Windows\) \{(\s*sheet::panel\(ui, tl!\("Installing on Windows"\))',
+           r"if false {\g<1>",
            regex=True)
     (carpeta / "crates/native/src/jacnex_accesos.rs").write_text(MODULO_ACCESOS, encoding="utf-8", newline="\n")
     parche(carpeta / "crates/native/src/lib.rs", "pub mod install;\n", "pub mod install;\n#[cfg(windows)]\nmod jacnex_accesos;\n")
