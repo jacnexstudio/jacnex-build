@@ -82,6 +82,27 @@ jobs:
           DIST: ${{ github.workspace }}/dist
         run: pwsh packaging/windows/package.ps1 -Arch x64
 
+      # Jacnex Studio instala las apps desde su zip portable y busca el .exe en la raíz del zip;
+      # package.ps1 lo empaqueta dentro de una carpeta, así que se vuelve a armar sin ella.
+      - name: Zip portable con el programa en la raíz
+        if: inputs.proyecto != 'launcher'
+        shell: pwsh
+        working-directory: dist
+        run: |
+          foreach ($zip in Get-ChildItem -File -Filter *-portable.zip) {
+            $tmp = Join-Path $env:RUNNER_TEMP $zip.BaseName
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath $tmp -Force
+            $dentro = @(Get-ChildItem -LiteralPath $tmp -Force)
+            if ($dentro.Count -eq 1 -and $dentro[0].PSIsContainer) {
+              Remove-Item -LiteralPath $zip.FullName
+              Compress-Archive -Path (Join-Path $dentro[0].FullName '*') -DestinationPath $zip.FullName -CompressionLevel Optimal
+              Write-Output "$($zip.Name): sin la carpeta $($dentro[0].Name)"
+            }
+            if (-not (Get-ChildItem -LiteralPath $tmp -Recurse -Filter *.exe | Where-Object { $_.Directory.FullName -eq $dentro[0].FullName -or $_.Directory.FullName -eq $tmp })) {
+              throw "$($zip.Name) no tiene el .exe de la app"
+            }
+          }
+
       # Solo el launcher: el instalador .exe que se descarga desde jacnex.com. Lleva un nombre sin
       # versión para que el enlace releases/latest/download/JacnexStudio-Setup.exe no cambie.
       - name: Instalador .exe (Inno Setup)

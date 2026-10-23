@@ -1981,10 +1981,10 @@ index 2fca11e..fb1df9f 100644
  pub fn social(service: &str) -> Option<ImageSource<'static>> {
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
 new file mode 100644
-index 0000000..8e17297
+index 0000000..91b342d
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex.rs
-@@ -0,0 +1,565 @@
+@@ -0,0 +1,589 @@
 +//! Jacnex Studio's window: the header, the shelf of apps on the left and the stage of the chosen
 +//! app. Installing, updating and opening go through the same actions as the rest of the launcher.
 +
@@ -2016,7 +2016,10 @@ index 0000000..8e17297
 +    lema: &'static str,
 +    funciones: [&'static str; 4],
 +    acerca: &'static str,
-+    base: &'static str,
++    /// The well-known program it works like, named only to describe it (nominative use).
++    parecida_a: &'static str,
++    /// Who owns that name, for the note that Jacnex isn't affiliated with them.
++    dueno: &'static str,
 +}
 +
 +const FICHAS: &[Ficha] = &[
@@ -2026,7 +2029,8 @@ index 0000000..8e17297
 +        lema: "Edición de imágenes con capas, máscaras y archivos PSD.",
 +        funciones: ["Capas, máscaras y objetos inteligentes", "Abre y guarda archivos PSD", "Retoque y reparación de fotos", "Color en 8, 16 y 32 bits"],
 +        acerca: "Un editor de imágenes completo con los menús, atajos y paneles que ya conoces, para que no tengas que aprender todo de nuevo. Funciona sin conexión y tus archivos se quedan en tu equipo.",
-+        base: "PhotoCraft",
++        parecida_a: "Photoshop",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "lightcraft",
@@ -2034,7 +2038,8 @@ index 0000000..8e17297
 +        lema: "Tu biblioteca de fotos y revelado RAW, sin suscripciones.",
 +        funciones: ["Revelado RAW de tu cámara", "Biblioteca con búsqueda y filtros", "Ajustes por lote", "Exportación para web y redes"],
 +        acerca: "Organiza miles de fotos, revela tus archivos RAW con ajustes no destructivos y exporta en el tamaño que necesites, todo desde una sola app.",
-+        base: "LightCraft",
++        parecida_a: "Lightroom",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "vectorcraft",
@@ -2042,7 +2047,8 @@ index 0000000..8e17297
 +        lema: "Ilustración vectorial, logos y tipografía a cualquier tamaño.",
 +        funciones: ["Pluma y curvas de precisión", "Logos, íconos e ilustraciones", "Abre archivos AI y SVG", "PDF listo para imprenta"],
 +        acerca: "Diseña logos, íconos e ilustraciones que se ven nítidos a cualquier tamaño, con herramientas de pluma, formas y texto pensadas para trabajo profesional.",
-+        base: "VectorCraft",
++        parecida_a: "Illustrator",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "designcraft",
@@ -2050,7 +2056,8 @@ index 0000000..8e17297
 +        lema: "Maquetación de revistas, catálogos y libros.",
 +        funciones: ["Revistas, catálogos y libros", "Estilos de párrafo y carácter", "Abre archivos IDML", "PDF listo para imprenta"],
 +        acerca: "Maqueta publicaciones de varias páginas con estilos, cuadrículas y páginas maestras, y entrégalas a imprenta en PDF.",
-+        base: "DesignCraft",
++        parecida_a: "InDesign",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "figcraft",
@@ -2058,7 +2065,8 @@ index 0000000..8e17297
 +        lema: "Diseño de interfaces y prototipos interactivos.",
 +        funciones: ["Diseño de pantallas", "Prototipos interactivos", "Componentes reutilizables", "Exportación para desarrollo"],
 +        acerca: "Diseña pantallas de apps y sitios web, conéctalas en prototipos y comparte el resultado con tu equipo.",
-+        base: "FigCraft",
++        parecida_a: "Figma",
++        dueno: "Figma",
 +    },
 +    Ficha {
 +        id: "filmcraft",
@@ -2066,7 +2074,8 @@ index 0000000..8e17297
 +        lema: "Edición de video con color y sonido profesional.",
 +        funciones: ["Línea de tiempo multipista", "Corrección de color", "Mezcla de audio", "Exportación hasta 4K"],
 +        acerca: "Edita tus videos en una línea de tiempo multipista, corrige el color, mezcla el sonido y exporta para redes, web o pantalla grande.",
-+        base: "FilmCraft",
++        parecida_a: "Premiere Pro",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "effectcraft",
@@ -2074,7 +2083,8 @@ index 0000000..8e17297
 +        lema: "Gráficos en movimiento y efectos visuales.",
 +        funciones: ["Animación por fotogramas clave", "Textos animados", "Composición por capas", "Efectos para redes sociales"],
 +        acerca: "Anima logos, textos y gráficos, combina capas de video y crea efectos visuales para tus anuncios y redes sociales.",
-+        base: "EffectCraft",
++        parecida_a: "After Effects",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "soundcraft",
@@ -2082,7 +2092,8 @@ index 0000000..8e17297
 +        lema: "Grabación, edición y mezcla de audio.",
 +        funciones: ["Grabación multipista", "Edición de audio", "Mezcla y efectos", "Exportación en varios formatos"],
 +        acerca: "Graba voces e instrumentos, edita y mezcla tus pistas y exporta audio listo para tus videos o podcasts.",
-+        base: "SoundCraft",
++        parecida_a: "Audition",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "pdfcraft",
@@ -2090,7 +2101,8 @@ index 0000000..8e17297
 +        lema: "Leer, firmar, organizar y proteger tus PDF.",
 +        funciones: ["Firma y rellena formularios", "Une, divide y ordena páginas", "Texto de escaneos (OCR)", "Protección con contraseña"],
 +        acerca: "Lee, firma, comenta y organiza documentos PDF, convierte escaneos en texto y protege tus archivos con contraseña.",
-+        base: "PdfCraft",
++        parecida_a: "Acrobat",
++        dueno: "Adobe",
 +    },
 +    Ficha {
 +        id: "wordcraft",
@@ -2098,7 +2110,8 @@ index 0000000..8e17297
 +        lema: "Escritura y diseño de documentos.",
 +        funciones: ["Documentos con estilo", "Abre archivos de Word", "Tablas e imágenes", "Exporta a PDF"],
 +        acerca: "Escribe y da formato a documentos, informes y cartas, y compártelos en los formatos que usa todo el mundo.",
-+        base: "WordCraft",
++        parecida_a: "Microsoft Word",
++        dueno: "Microsoft",
 +    },
 +    Ficha {
 +        id: "gridcraft",
@@ -2106,7 +2119,8 @@ index 0000000..8e17297
 +        lema: "Hojas de cálculo y datos.",
 +        funciones: ["Fórmulas y funciones", "Abre archivos de Excel", "Gráficos", "Tablas y filtros"],
 +        acerca: "Organiza datos, calcula con fórmulas y crea gráficos en hojas de cálculo compatibles con los formatos más usados.",
-+        base: "GridCraft",
++        parecida_a: "Microsoft Excel",
++        dueno: "Microsoft",
 +    },
 +    Ficha {
 +        id: "deckcraft",
@@ -2114,7 +2128,8 @@ index 0000000..8e17297
 +        lema: "Presentaciones y diapositivas.",
 +        funciones: ["Diapositivas con diseño", "Abre archivos de PowerPoint", "Modo presentador", "Exporta a PDF"],
 +        acerca: "Crea presentaciones claras y atractivas, preséntalas en pantalla completa y compártelas en PDF.",
-+        base: "DeckCraft",
++        parecida_a: "Microsoft PowerPoint",
++        dueno: "Microsoft",
 +    },
 +];
 +
@@ -2490,9 +2505,18 @@ index 0000000..8e17297
 +        if let Some(f) = ficha {
 +            ui.add_space(10.0);
 +            ui.label(
-+                RichText::new(format!("Basado en {}, de código abierto (MIT o Apache-2.0).", f.base))
-+                    .font(FontId::new(12.0, egui::FontFamily::Proportional))
-+                    .color(t.muted),
++                RichText::new(format!("Si vienes de {}®, te sentirás en casa.", f.parecida_a))
++                    .font(FontId::new(13.0, egui::FontFamily::Proportional))
++                    .color(t.ink),
++            );
++            ui.add_space(4.0);
++            ui.label(
++                RichText::new(format!(
++                    "{}® es una marca registrada de {}. {} es un programa independiente, sin afiliación ni respaldo de {}.",
++                    f.parecida_a, f.dueno, entry.app.name, f.dueno
++                ))
++                .font(FontId::new(11.0, egui::FontFamily::Proportional))
++                .color(t.muted),
 +            );
 +        }
 +    }
