@@ -1981,10 +1981,10 @@ index 2fca11e..fb1df9f 100644
  pub fn social(service: &str) -> Option<ImageSource<'static>> {
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
 new file mode 100644
-index 0000000..6603ce1
+index 0000000..8e17297
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex.rs
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,565 @@
 +//! Jacnex Studio's window: the header, the shelf of apps on the left and the stage of the chosen
 +//! app. Installing, updating and opening go through the same actions as the rest of the launcher.
 +
@@ -2186,9 +2186,11 @@ index 0000000..6603ce1
 +    }
 +
 +    fn jx_elegir(&self, ctx: &egui::Context, id: &str) {
++        // The time is read before data_mut: reading the input inside it locks the context twice.
++        let ahora = ctx.input(|i| i.time);
 +        ctx.data_mut(|d| {
 +            d.insert_temp(egui::Id::new("jx-elegida"), id.to_string());
-+            d.insert_temp(egui::Id::new("jx-elegida-desde"), ctx.input(|i| i.time));
++            d.insert_temp(egui::Id::new("jx-elegida-desde"), ahora);
 +        });
 +    }
 +
@@ -2297,6 +2299,7 @@ index 0000000..6603ce1
 +        let t = Tokens::get(ui.ctx());
 +        let ancho = ui.available_width();
 +        let (fila, resp) = ui.allocate_exact_size(vec2(ancho, SHELF_ROW_H), Sense::click());
++        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, actual, e.app.name));
 +        let caja = Rect::from_min_max(fila.min + vec2(10.0, 2.0), fila.max - vec2(10.0, 2.0));
 +        let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered() && !actual, 0.12);
 +        let p = ui.painter();
@@ -3043,10 +3046,10 @@ index 0326672..a3f0a31 100644
          Glyph::Close => {
 diff --git a/crates/ui-egui/tests/jacnex_capturas.rs b/crates/ui-egui/tests/jacnex_capturas.rs
 new file mode 100644
-index 0000000..5a028d0
+index 0000000..1081831
 --- /dev/null
 +++ b/crates/ui-egui/tests/jacnex_capturas.rs
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,158 @@
 +//! Captures of Jacnex Studio's window, drawn off screen: no real backend, nothing on the desktop.
 +//! Run with JACNEX_STUDIO_SNAPSHOTS=<folder> to save them; without it the test only draws.
 +
@@ -3056,6 +3059,7 @@ index 0000000..5a028d0
 +use jacnex_studio_core::{Arch, Installed, Os, Platform, SUITE, version};
 +use jacnex_studio_ui_egui::{Host, LauncherUi, Settings};
 +use egui_kittest::Harness;
++use egui_kittest::kittest::Queryable;
 +
 +const NOW: i64 = 1_792_700_000;
 +
@@ -3165,6 +3169,35 @@ index 0000000..5a028d0
 +    if let Some(dir) = std::env::var_os("JACNEX_STUDIO_SNAPSHOTS") {
 +        let img = harness.render().expect("render");
 +        img.save(std::path::Path::new(&dir).join(format!("{nombre}.png"))).expect("save");
++    }
++}
++
++/// Choosing another app in the shelf used to lock the egui context twice and hang the window.
++#[test]
++fn elegir_otra_app_no_bloquea() {
++    jacnex_studio_ui_egui::i18n::set_test_lang(jacnex_studio_ui_egui::i18n::Lang::ES);
++    let mut backend: Option<Box<dyn Backend>> = Some(Box::new(Fake { events: events(false) }));
++    let mut harness = Harness::builder().with_size(egui::vec2(1180.0, 720.0)).build_ui_state(
++        move |ui, launcher: &mut Option<LauncherUi>| {
++            if launcher.is_none()
++                && let Some(b) = backend.take()
++            {
++                *launcher = Some(LauncherUi::new(ui.ctx(), b, Settings { notify: false, ..Settings::default() }));
++            }
++            if let Some(l) = launcher.as_mut() {
++                l.logic(&ui.ctx().clone(), &mut NoHost);
++                l.ui(ui, &mut NoHost);
++            }
++        },
++        None,
++    );
++    harness.run_steps(12);
++    for nombre in ["Vectornex", "Filmnex", "Photonex"] {
++        harness.get_by_label(nombre).click();
++        harness.run_steps(4);
++        let elegida: Option<String> = harness.ctx.data(|d| d.get_temp(egui::Id::new("jx-elegida")));
++        let esperada = SUITE.iter().find(|a| a.name == nombre).map(|a| a.id.to_string());
++        assert_eq!(elegida, esperada, "{nombre}");
 +    }
 +}
 +
