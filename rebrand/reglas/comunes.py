@@ -123,6 +123,26 @@ LICENCIAS = ("NOTICE", "LICENSE-MIT", "LICENSE-APACHE", "ATTRIBUTION.md", "ASSET
 KEYPATH = ' KeyPath="yes"'
 
 
+def identidad_actualizador(carpeta, app, marca, parche):
+    """El actualizador de cada app (craft-update, una biblioteca de ArtCraft que no pasa por el
+    cambio de marca) toma el nombre, el repositorio y el desarrollador de craft_update::suite:
+    sin esto la app buscaría versiones en storytold/<app> y diría "VectorCraft by ArtCraft".
+    El nombre también sirve para encontrar la instalación (Software\\<nombre>, Program Files).
+    """
+    lib = carpeta / "crates/ui-egui/src/lib.rs"
+    constante = f"craft_update::suite::{app.upper()}"
+    if not lib.exists() or constante not in lib.read_text(encoding="utf-8"):
+        return  # versiones sin craft-update
+    datos = marca["apps"][app]
+
+    def campos(m):
+        s = m.group(1)
+        return (f'{s}name: "{datos["nombre"]}",\n{s}repo: "{marca["github"]}/{app}",\n'
+                f'{s}developer: "{marca["empresa"]}",\n{s}..{constante}')
+
+    parche(lib, rf"(?m)^([ \t]*)\.\.{constante}\b", campos, regex=True)
+
+
 def ajustar_instalador_windows(carpeta, proyecto):
     """Prepara el instalador de Windows (WiX) y el paquete portable de una app.
 

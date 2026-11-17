@@ -55,8 +55,31 @@ def parches(carpeta, marca, parche):
            "pub const SOCIAL: [(&str, &str); 0] = [];", regex=True)
 
     filtrar_catalogo(carpeta, marca)
+    identidad_actualizador(carpeta, marca, parche)
     comunes.ajustar_instalador_windows(carpeta, "launcher")
     instalacion_como_adobe(carpeta, parche)
+
+
+def identidad_actualizador(carpeta, marca, parche):
+    """El launcher se actualiza con craft-update (biblioteca de ArtCraft, sin cambio de marca), que lo
+    describe como artcraft-launcher de storytold/craft-launcher: así no reconocería los archivos de
+    nuestras versiones (jacnex-studio-<versión>-...) ni aceptaría descargas de jacnexstudio."""
+    ruta = carpeta / "crates/native/src/self_update.rs"
+    if not ruta.exists():
+        return
+    lanzador = marca["launcher"]
+    if "craft_update::suite::LAUNCHER" not in ruta.read_text(encoding="utf-8"):
+        raise ErrorDeParche(f"{ruta}: ya no usa craft_update::suite::LAUNCHER (revisar)")
+    parche(ruta, "craft_update::suite::LAUNCHER", "JACNEX_LAUNCHER", conteo=None)
+    constante = (
+        "/// Jacnex Studio como lo conoce craft-update (agregado por Jacnex).\n"
+        "const JACNEX_LAUNCHER: craft_update::app::App = craft_update::app::App {\n"
+        f'    developer: "{marca["empresa"]}",\n'
+        f'    ..craft_update::app::App::new("{lanzador["id"]}", "{lanzador["nombre"]}", '
+        f'"Installs and updates {marca["suite"]}", "{marca["github"]}/{lanzador["repo"]}")\n'
+        "};\n"
+    )
+    parche(ruta, "use crate::http::{Http, Stop};\n", "use crate::http::{Http, Stop};\n\n" + constante)
 
 
 def filtrar_catalogo(carpeta, marca):
