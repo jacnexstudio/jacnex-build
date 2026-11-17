@@ -21,8 +21,8 @@ AppName=Jacnex Studio
 AppVersion={#Version}
 AppVerName=Jacnex Studio {#Version}
 AppPublisher=Jacnex Solutions
-AppPublisherURL=https://jacnex.com
-AppSupportURL=https://jacnex.com/soporte
+AppPublisherURL=https://jacnex.store
+AppSupportURL=https://jacnex.store/soporte
 VersionInfoCompany=Jacnex Solutions
 VersionInfoDescription=Instalador de Jacnex Studio
 VersionInfoProductName=Jacnex Studio
@@ -60,7 +60,7 @@ es.ClickFinish=Haz clic en Finalizar para cerrar el asistente.
 es.Escritorio=Crear un acceso directo en el escritorio
 es.Instalando=Instalando Jacnex Studio...
 es.Abrir=Abrir Jacnex Studio
-es.Fallo=No se pudo instalar Jacnex Studio (código %1).%n%nCierra Jacnex Studio si está abierto y vuelve a intentarlo. Si el problema sigue, escríbenos a soporte@jacnex.com.
+es.Fallo=No se pudo instalar Jacnex Studio (código %1).%n%nCierra Jacnex Studio si está abierto y vuelve a intentarlo. Si el problema sigue, escríbenos por WhatsApp desde jacnex.store/soporte.
 
 [Tasks]
 Name: "escritorio"; Description: "{cm:Escritorio}"

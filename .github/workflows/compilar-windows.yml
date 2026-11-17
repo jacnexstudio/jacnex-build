@@ -103,7 +103,7 @@ jobs:
             }
           }
 
-      # Solo el launcher: el instalador .exe que se descarga desde jacnex.com. Lleva un nombre sin
+      # Solo el launcher: el instalador .exe que se descarga desde jacnex.store. Lleva un nombre sin
       # versión para que el enlace releases/latest/download/JacnexStudio-Setup.exe no cambie.
       - name: Instalador .exe (Inno Setup)
         if: inputs.proyecto == 'launcher'

@@ -1981,7 +1981,7 @@ index 2fca11e..fb1df9f 100644
  pub fn social(service: &str) -> Option<ImageSource<'static>> {
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
 new file mode 100644
-index 0000000..68c7cb1
+index 0000000..3b29969
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex.rs
 @@ -0,0 +1,1430 @@
@@ -2027,12 +2027,12 @@ index 0000000..68c7cb1
 +const NOVEDADES_H: f32 = 206.0;
 +const CARD_RADIUS: u8 = 16;
 +
-+const FORGENEX_URL: &str = "https://jacnex.com/app";
-+const PLANES_URL: &str = "https://jacnex.com/precios";
++const FORGENEX_URL: &str = "https://jacnex.store/app";
++const PLANES_URL: &str = "https://jacnex.store/app/precios";
 +/// Inicio or Apps (`true`), kept in the context.
 +const EN_APPS: &str = "jx-en-apps";
 +
-+// The brand's colours (jacnex.com), for the band and the AI surfaces; everything else uses Tokens.
++// The brand's colours, for the band and the AI surfaces; everything else uses Tokens.
 +const AZUL_OSCURO: Color32 = Color32::from_rgb(0x0b, 0x3f, 0xb0);
 +const AZUL: Color32 = Color32::from_rgb(0x12, 0x68, 0xf8);
 +const AZUL_CLARO: Color32 = Color32::from_rgb(0x4c, 0x8d, 0xff);
@@ -3411,8 +3411,8 @@ index 0000000..68c7cb1
 +
 +    #[test]
 +    fn la_idea_va_en_la_direccion() {
-+        assert_eq!(url_forgenex("  ", false), "https://jacnex.com/app?tipo=imagen");
-+        assert_eq!(url_forgenex("Café & sol\n", true), "https://jacnex.com/app?tipo=video&prompt=Caf%C3%A9%20%26%20sol");
++        assert_eq!(url_forgenex("  ", false), "https://jacnex.store/app?tipo=imagen");
++        assert_eq!(url_forgenex("Café & sol\n", true), "https://jacnex.store/app?tipo=video&prompt=Caf%C3%A9%20%26%20sol");
 +    }
 +}
 diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
@@ -3454,7 +3454,7 @@ index a8f9bc6..11b879b 100644
 --- a/crates/ui-egui/src/theme.rs
 +++ b/crates/ui-egui/src/theme.rs
 @@ -1,5 +1,5 @@
--//! Colours, type and shapes, matching jacnex.com: hard edges, hairline rules, Archivo
+-//! Colours, type and shapes, matching jacnex.store: hard edges, hairline rules, Archivo
 -//! display type, Inter body text and Geist Mono labels. Widgets read [`Tokens::get`]; nothing
 +//! Colours, type and shapes of the Jacnex brand: white and navy with the brand blue, soft corners
 +//! and Plus Jakarta Sans throughout. Widgets read [`Tokens::get`]; nothing

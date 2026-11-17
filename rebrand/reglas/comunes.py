@@ -36,10 +36,10 @@ def urls_y_repos(marca):
         # El launcher pregunta las versiones a un servidor de ArtCraft; el de Jacnex vive en su web
         # (si no responde, el launcher consulta GitHub directamente).
         (r"https://api\.storyteller\.ai/v1/craft_apps/release_info", f"{web}/api/suite/release_info"),
-        (r"[\w.+-]+@storyteller\.ai", f"soporte@{web.removeprefix('https://')}"),
+        (r"[\w.+-]+@storyteller\.ai", marca["correo"]),
         (r"ai\.storyteller\.", f"{marca['prefijo_id']}."),
         (r'"ai\.storyteller"', f'"{marca["prefijo_id"]}"'),
-        # La comunidad de Jacnex es un grupo de WhatsApp; jacnex.com/whatsapp redirige a la invitación
+        # La comunidad de Jacnex es un grupo de WhatsApp; jacnex.store/whatsapp redirige a la invitación
         # vigente, así se puede cambiar de grupo sin recompilar las apps.
         (r"https?://(?:www\.)?discord\.(?:gg|com/invite)/artcraft", marca["whatsapp"]),
         (r"discord://-/invite/artcraft", marca["whatsapp"]),
@@ -90,6 +90,8 @@ def marca_generica(marca):
 
 
 def nuevo_guid(proyecto, guid):
+    # No cambiar el texto aunque la web ya no sea jacnex.com: de él salen los GUID del MSI, y si
+    # cambian, Windows trata la versión nueva como otro programa y no actualiza la instalada.
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://jacnex.com/{proyecto}/{guid.upper()}")).upper()
 
 

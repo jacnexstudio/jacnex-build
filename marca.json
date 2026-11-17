@@ -1,8 +1,9 @@
 {
   "empresa": "Jacnex",
-  "web": "https://jacnex.com",
-  "soporte": "https://jacnex.com/soporte",
-  "whatsapp": "https://jacnex.com/whatsapp",
+  "web": "https://jacnex.store",
+  "soporte": "https://jacnex.store/soporte",
+  "whatsapp": "https://jacnex.store/whatsapp",
+  "correo": "jacnexsolutions@gmail.com",
   "github": "jacnexstudio",
   "prefijo_id": "com.jacnex",
   "suite": "Jacnex Suite",
