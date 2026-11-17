@@ -259,6 +259,11 @@ def fuentes(carpeta):
         if ".set_fonts(" not in texto:
             continue
         nuevo, n = _envolver_set_fonts(texto)
+        # Algunas apps esperan a que las fuentes aplicadas sean las que pidieron antes de dibujar
+        # (VectorCraft 0.24: `applied.definitions() == &fonts`): se compara con las de Jacnex,
+        # que son las que de verdad se aplicaron; si no, la ventana se queda en negro.
+        nuevo = re.sub(r"\.definitions\(\) (==|!=) &(\w+)\b(?!\.)",
+                       r".definitions() \1 &crate::jacnex_marca::con_fuentes(\2.clone())", nuevo)
         rs.write_text(nuevo, encoding="utf-8", newline="")
         total += n
     if total == 0:
