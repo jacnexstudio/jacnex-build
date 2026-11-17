@@ -70,6 +70,10 @@ jobs:
         with:
           workspaces: src
 
+      # Después de la caché: cambia la copia descargada de craft-update (actualizarse sin firma).
+      - name: Ajustar bibliotecas de ArtCraft
+        run: python -B jb/rebrand/bibliotecas.py src
+
       - name: Instalar WiX (instalador MSI)
         run: |
           dotnet tool install --global wix --version 5.0.2
