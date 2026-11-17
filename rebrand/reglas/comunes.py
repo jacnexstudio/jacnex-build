@@ -22,7 +22,7 @@ def urls_y_repos(marca):
     gh, web = marca["github"], marca["web"]
     return [
         (r"https://(?:www\.)?getartcraft\.com", web),
-        (r"(?:www\.)?getartcraft\.com", web.removeprefix("https://")),
+        (r"(?i)(?:www\.)?getartcraft\.com", web.removeprefix("https://")),
         (r"raw\.githubusercontent\.com/storytold/craft-launcher-assets", f"raw.githubusercontent.com/{gh}/jacnex-assets"),
         (r"storytold/craft-launcher-assets", f"{gh}/jacnex-assets"),
         (r"storytold/craft-launcher\b", f"{gh}/{marca['launcher']['repo']}"),
@@ -109,7 +109,7 @@ def renovar_guids(carpeta_windows, proyecto):
         return nuevo.lower() if original == original.lower() else nuevo
 
     for archivo in carpeta_windows.iterdir():
-        if archivo.suffix.lower() not in (".wxs", ".wxi", ".wxl", ".ps1"):
+        if archivo.suffix.lower() not in (".wxs", ".wxi", ".wxl", ".ps1", ".json"):
             continue
         datos = archivo.read_bytes()
         bom = datos.startswith(b"\xef\xbb\xbf")

@@ -1,6 +1,9 @@
 """Reglas para ArtCraft Launcher -> Jacnex Studio (storytold/craft-launcher)."""
 
+import re
+
 from reglas import comunes
+from reglas.comunes import ErrorDeParche
 
 
 def nombre_producto(marca):
@@ -51,16 +54,37 @@ def parches(carpeta, marca, parche):
            r"pub const SOCIAL: \[\(&str, &str\); \d+\] = \[.*?\];",
            "pub const SOCIAL: [(&str, &str); 0] = [];", regex=True)
 
-    # Apps que Jacnex no ofrece (marca.json: "excluida"): se quitan del catálogo del launcher.
-    catalogo = carpeta / "crates/core/src/catalog.rs"
-    excluidas = [app for app, datos in marca["apps"].items() if datos.get("excluida")]
-    for app in excluidas:
-        parche(catalogo, rf'\n    app\(\s*"{app}",.*?"[^"]*/{app}",\s*\),', "", regex=True)
-    if excluidas:
-        parche(catalogo, r"pub const SUITE: \[CraftApp; \d+\]",
-               f"pub const SUITE: [CraftApp; {len(marca['apps']) - len(excluidas)}]", regex=True)
+    filtrar_catalogo(carpeta, marca)
     comunes.ajustar_instalador_windows(carpeta, "launcher")
     instalacion_como_adobe(carpeta, parche)
+
+
+def filtrar_catalogo(carpeta, marca):
+    """El launcher muestra solo las apps de Jacnex (marca.json, sin las "excluida").
+
+    Desde la v0.8 el catálogo es crates/core/catalog.toml (build.rs genera SUITE a partir de él).
+    ArtCraft agrega apps nuevas y de terceros (comunidad); no entran hasta tener nombre en marca.json.
+    """
+    catalogo = carpeta / "crates/core/catalog.toml"
+    if not catalogo.exists():
+        raise ErrorDeParche(f"no se encontró {catalogo}")
+    texto = catalogo.read_text(encoding="utf-8")
+    bloques = re.split(r"(?m)^(?=\[\[apps\]\]\s*$)", texto)
+    cabecera, apps = bloques[0], bloques[1:]
+    if not apps:
+        raise ErrorDeParche(f"{catalogo}: no hay bloques [[apps]]")
+    permitidas = {app for app, datos in marca["apps"].items() if not datos.get("excluida")}
+    quedan = []
+    for bloque in apps:
+        m = re.search(r'(?m)^id = "([^"]+)"', bloque)
+        if not m:
+            raise ErrorDeParche(f"{catalogo}: un bloque [[apps]] no tiene id")
+        if m.group(1) in permitidas:
+            quedan.append(bloque if bloque.endswith("\n\n") else bloque.rstrip("\n") + "\n\n")
+    faltan = permitidas - {re.search(r'(?m)^id = "([^"]+)"', b).group(1) for b in quedan}
+    if faltan:
+        raise ErrorDeParche(f"{catalogo}: faltan las apps {sorted(faltan)}")
+    catalogo.write_text(cabecera + "".join(quedan).rstrip("\n") + "\n", encoding="utf-8", newline="")
 
 
 # --- Instalación como Creative Cloud --------------------------------------------------------------
@@ -143,9 +167,21 @@ def instalacion_como_adobe(carpeta, parche):
            r"        &[]" "\n"
            r"    };" "\n",
            regex=True)
+    # Desde la v0.8 el panel es la función windows_kinds (y antes estaba en línea).
     parche(carpeta / "crates/ui-egui/src/settings_dialog.rs",
-           r'if self\.platform\.is_some_and\(\|p\| p\.os == Os::Windows\) \{(\s*sheet::panel\(ui, tl!\("Installing on Windows"\))',
+           r'if self\.platform\.is_some_and\(\|p\| p\.os == Os::Windows\) \{(\s*(?:self\.windows_kinds\(ui\);|sheet::panel\(ui, tl!\("Installing on Windows"\)))',
            r"if false {\g<1>",
            regex=True)
+    # La interfaz calcula por su cuenta en qué carpeta quedaría una instalación nueva: que use el
+    # mismo orden (zip portable primero) y tampoco haga caso a la preferencia guardada.
+    objetivo = carpeta / "crates/ui-egui/src/install_target.rs"
+    if objetivo.exists():
+        parche(objetivo,
+               "Os::Windows => &[PackageKind::Msi, PackageKind::PortableZip],",
+               "Os::Windows => &[PackageKind::PortableZip, PackageKind::Msi],")
+        parche(objetivo,
+               r"(fn fresh_kinds\(app: &CraftApp, os: Os, preferred: &\[PackageKind\]\) -> Vec<PackageKind> \{\n)",
+               r"\g<1>    let preferred: &[PackageKind] = if os == Os::Windows { &[] } else { preferred };" "\n",
+               regex=True)
     (carpeta / "crates/native/src/jacnex_accesos.rs").write_text(MODULO_ACCESOS, encoding="utf-8", newline="\n")
     parche(carpeta / "crates/native/src/lib.rs", "pub mod install;\n", "pub mod install;\n#[cfg(windows)]\nmod jacnex_accesos;\n")
