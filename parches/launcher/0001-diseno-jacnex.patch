@@ -1981,14 +1981,20 @@ index 2fca11e..fb1df9f 100644
  pub fn social(service: &str) -> Option<ImageSource<'static>> {
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
 new file mode 100644
-index 0000000..91b342d
+index 0000000..68c7cb1
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex.rs
-@@ -0,0 +1,589 @@
-+//! Jacnex Studio's window: the header, the shelf of apps on the left and the stage of the chosen
-+//! app. Installing, updating and opening go through the same actions as the rest of the launcher.
+@@ -0,0 +1,1430 @@
++//! Jacnex Studio's window: the blue brand header, and under it either Inicio (the AI box and the
++//! apps by category) or Apps (the shelf of apps on the left and the stage of the chosen app).
++//! Installing, updating and opening go through the same actions as the rest of the launcher.
 +
-+use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, vec2};
++use std::sync::Arc;
++
++use egui::{
++    Align, Align2, Color32, CornerRadius, FontId, Galley, Layout, Margin, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder,
++    pos2, vec2,
++};
 +use jacnex_studio_core::platform::pick_asset;
 +use jacnex_studio_core::protocol::JobPhase;
 +use jacnex_studio_core::status::AppStatus;
@@ -1999,7 +2005,7 @@ index 0000000..91b342d
 +use crate::views::Primary;
 +use crate::widgets::{self, Kind};
 +
-+const HEADER_H: f32 = 56.0;
++const HEADER_H: f32 = 60.0;
 +const SHELF_W: f32 = 248.0;
 +const SHELF_ROW_H: f32 = 50.0;
 +const STAGE_H: f32 = 316.0;
@@ -2008,6 +2014,46 @@ index 0000000..91b342d
 +const CARD_W: f32 = 330.0;
 +/// How long the stage takes to fade in when another app is chosen.
 +const STAGE_FADE: f32 = 0.24;
++
++/// The blue band: the header plus, on Inicio, the greeting and the AI box under it.
++const BANDA_H: f32 = 236.0;
++const HERO_H: f32 = BANDA_H - HEADER_H;
++const PAGE_PAD: f32 = 32.0;
++const GAP: f32 = 16.0;
++/// How far the cards of Inicio climb over the band.
++const SOLAPE: f32 = 26.0;
++const CARD_HEAD_H: f32 = 46.0;
++const APP_ROW_H: f32 = 56.0;
++const NOVEDADES_H: f32 = 206.0;
++const CARD_RADIUS: u8 = 16;
++
++const FORGENEX_URL: &str = "https://jacnex.com/app";
++const PLANES_URL: &str = "https://jacnex.com/precios";
++/// Inicio or Apps (`true`), kept in the context.
++const EN_APPS: &str = "jx-en-apps";
++
++// The brand's colours (jacnex.com), for the band and the AI surfaces; everything else uses Tokens.
++const AZUL_OSCURO: Color32 = Color32::from_rgb(0x0b, 0x3f, 0xb0);
++const AZUL: Color32 = Color32::from_rgb(0x12, 0x68, 0xf8);
++const AZUL_CLARO: Color32 = Color32::from_rgb(0x4c, 0x8d, 0xff);
++const VIOLETA: Color32 = Color32::from_rgb(0x6d, 0x4a, 0xff);
++const VIOLETA_OSCURO: Color32 = Color32::from_rgb(0x3b, 0x22, 0xb8);
++const VIOLETA_CLARO: Color32 = Color32::from_rgb(0x8a, 0x4d, 0xff);
++const VIOLETA_TINTA: Color32 = Color32::from_rgb(0x4b, 0x2f, 0xd1);
++
++/// A column of Inicio: the apps whose `Ficha::categoria` is `clave`.
++struct Categoria {
++    clave: &'static str,
++    nombre: &'static str,
++    color: Color32,
++}
++
++const CATEGORIAS: [Categoria; 4] = [
++    Categoria { clave: "FOTO", nombre: "Foto", color: Color32::from_rgb(0x2f, 0x7b, 0xf5) },
++    Categoria { clave: "DISEÑO", nombre: "Diseño", color: Color32::from_rgb(0xe8, 0x57, 0x3a) },
++    Categoria { clave: "VIDEO Y AUDIO", nombre: "Video y audio", color: Color32::from_rgb(0x8b, 0x5c, 0xf6) },
++    Categoria { clave: "DOCUMENTOS", nombre: "Documentos", color: Color32::from_rgb(0x0e, 0x9f, 0x7a) },
++];
 +
 +/// What the launcher says about each app, in Spanish.
 +struct Ficha {
@@ -2173,17 +2219,23 @@ index 0000000..91b342d
 +    /// The whole window under the title bar.
 +    pub(crate) fn jacnex_layout(&mut self, ui: &mut Ui, host: &mut dyn Host) {
 +        let t = Tokens::get(ui.ctx());
++        let apps = en_apps(ui.ctx());
 +        egui::Panel::top("jx-cabecera")
-+            .frame(egui::Frame::new().fill(t.bg))
++            .frame(egui::Frame::new().fill(AZUL))
++            .show_separator_line(false)
 +            .exact_size(HEADER_H)
 +            .resizable(false)
-+            .show(ui, |ui| self.jx_cabecera(ui, host.title_bar()));
-+        egui::Panel::left("jx-repisa")
-+            .frame(egui::Frame::new().fill(t.sunken))
-+            .exact_size(SHELF_W)
-+            .resizable(false)
-+            .show(ui, |ui| self.jx_repisa(ui));
-+        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| self.jx_escenario(ui));
++            .show(ui, |ui| self.jx_cabecera(ui, host.title_bar(), apps));
++        if apps {
++            egui::Panel::left("jx-repisa")
++                .frame(egui::Frame::new().fill(t.sunken))
++                .exact_size(SHELF_W)
++                .resizable(false)
++                .show(ui, |ui| self.jx_repisa(ui));
++            egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg)).show(ui, |ui| self.jx_escenario(ui));
++        } else {
++            egui::CentralPanel::default().frame(egui::Frame::new().fill(fondo_pagina(&t))).show(ui, |ui| self.jx_inicio(ui));
++        }
 +    }
 +
 +    /// The app on the stage: the one chosen, else the first installed, else the first one.
@@ -2211,45 +2263,72 @@ index 0000000..91b342d
 +
 +    // ---- header ------------------------------------------------------------------------------
 +
-+    fn jx_cabecera(&mut self, ui: &mut Ui, bar: TitleBar) {
-+        let t = Tokens::get(ui.ctx());
++    fn jx_cabecera(&mut self, ui: &mut Ui, bar: TitleBar, apps: bool) {
++        let ctx = ui.ctx().clone();
 +        let full = ui.max_rect();
++        // On Inicio the band goes on under the header and scrolls with the page: the header shows
++        // the part of the band behind it (Inicio leaves where the band starts, the frame before).
++        let arriba = if apps { full.top() } else { ctx.data(|d| d.get_temp(egui::Id::new("jx-banda-y"))).unwrap_or(full.top()) };
++        pintar_banda(ui.painter(), full, banda_en(&ctx, arriba));
 +        if bar != TitleBar::Native {
 +            widgets::title_bar_drag(ui);
 +        }
-+        ui.painter().hline(full.x_range(), full.bottom() - 0.5, t.hairline());
++        let mut ir_a: Option<bool> = None;
++        let compacta = full.width() < 960.0;
++        let con_forgenex = full.width() >= 1100.0;
 +        ui.horizontal_centered(|ui| {
-+            ui.spacing_mut().item_spacing.x = 8.0;
++            ui.spacing_mut().item_spacing.x = 6.0;
 +            if bar == TitleBar::MacOs {
 +                ui.add_space(72.0);
 +            }
-+            ui.add_space(20.0);
-+            let alto = 26.0;
-+            let (logo, _) = ui.allocate_exact_size(vec2(alto * crate::icons::JACNEX_LOGO_ASPECT, alto), Sense::hover());
-+            egui::Image::new(crate::icons::jacnex_logo(t.dark)).alt_text("Jacnex Studio").paint_at(ui, logo);
++            ui.add_space(PAGE_PAD - 6.0);
++            // A narrow window gets the "A" mark instead of the whole wordmark.
++            if compacta {
++                let (logo, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
++                egui::Image::new(crate::icons::jacnex_mark()).alt_text("Jacnex Studio").paint_at(ui, logo);
++                ui.add_space(14.0);
++            } else {
++                let alto = 24.0;
++                let (logo, _) = ui.allocate_exact_size(vec2(alto * crate::icons::JACNEX_LOGO_ASPECT, alto), Sense::hover());
++                egui::Image::new(crate::icons::jacnex_logo(true)).alt_text("Jacnex Studio").paint_at(ui, logo);
++                ui.add_space(30.0);
++            }
++            if pildora(ui, "Inicio", !apps).clicked() {
++                ir_a = Some(false);
++            }
++            if pildora(ui, "Apps", apps).clicked() {
++                ir_a = Some(true);
++            }
++            if pildora(ui, "Comunidad", false).on_hover_text("La comunidad de Jacnex en WhatsApp").clicked() {
++                ctx.open_url(egui::OpenUrl::new_tab(self.discord_url));
++            }
 +            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
 +                if bar == TitleBar::Custom {
-+                    widgets::window_buttons(ui, HEADER_H);
++                    botones_ventana(ui, HEADER_H);
 +                    ui.add_space(4.0);
 +                } else {
-+                    ui.add_space(16.0);
++                    ui.add_space(PAGE_PAD - 6.0);
 +                }
-+                if widgets::nav_icon(ui, "⚙", "Configuración", 38.0, false).clicked() {
++                if icono_blanco(ui, "⚙", "Configuración", false).clicked() {
 +                    self.dialog = Some(Dialog::Settings);
 +                }
-+                if widgets::nav_icon(ui, "⟳", if self.checking { "Buscando actualizaciones…" } else { "Buscar actualizaciones" }, 38.0, self.checking)
-+                    .clicked()
-+                {
++                let tip = if self.checking { "Buscando actualizaciones…" } else { "Buscar actualizaciones" };
++                if icono_blanco(ui, "⟳", tip, self.checking).clicked() {
 +                    self.check_now();
 +                }
 +                ui.add_space(6.0);
-+                if widgets::button(ui, "Forgenex · IA", Kind::Secondary, 0.0).on_hover_text("Imágenes y videos con IA, con tus créditos").clicked() {
-+                    ui.ctx().open_url(egui::OpenUrl::new_tab("https://jacnex.com/app"));
++                if con_forgenex
++                    && pildora_llena(ui, "Forgenex · IA", false).on_hover_text("Imágenes y videos con IA, con tus créditos").clicked() {
++                    ctx.open_url(egui::OpenUrl::new_tab(FORGENEX_URL));
 +                }
 +                let pendientes = self.jx_pendientes();
 +                if !pendientes.is_empty() {
-+                    let texto = if pendientes.len() == 1 { "Actualizar 1 app".to_string() } else { format!("Actualizar {} apps", pendientes.len()) };
-+                    if widgets::button(ui, &texto, Kind::Primary, 0.0).clicked() {
++                    let texto = match (pendientes.len(), compacta) {
++                        (n, true) => format!("Actualizar ({n})"),
++                        (1, false) => "Actualizar 1 app".to_string(),
++                        (n, false) => format!("Actualizar {n} apps"),
++                    };
++                    if pildora_llena(ui, &texto, true).clicked() {
 +                        for id in pendientes {
 +                            self.install_app(&id);
 +                        }
@@ -2257,6 +2336,9 @@ index 0000000..91b342d
 +                }
 +            });
 +        });
++        if let Some(apps) = ir_a {
++            ctx.data_mut(|d| d.insert_temp(egui::Id::new(EN_APPS), apps));
++        }
 +    }
 +
 +    /// Apps with an update ready and nothing running.
@@ -2558,6 +2640,754 @@ index 0000000..91b342d
 +            ui.label(RichText::new("Esta app todavía no tiene una versión publicada. Aparecerá aquí en cuanto esté lista.").color(t.muted));
 +        }
 +    }
++
++    // ---- Inicio ------------------------------------------------------------------------------
++
++    /// The home page: the rest of the blue band with the greeting and the AI box, and the apps
++    /// by category on cards that climb over it.
++    fn jx_inicio(&mut self, ui: &mut Ui) {
++        let ctx = ui.ctx().clone();
++        egui::ScrollArea::vertical().id_salt("jx-inicio").auto_shrink(false).show(ui, |ui| {
++            let ancho = ui.available_width();
++            let (heroe, _) = ui.allocate_exact_size(vec2(ancho, HERO_H), Sense::hover());
++            // Where the band starts (above this panel, behind the header), for the header to match.
++            let arriba = heroe.top() - HEADER_H;
++            let antes: Option<f32> = ctx.data(|d| d.get_temp(egui::Id::new("jx-banda-y")));
++            if antes != Some(arriba) {
++                ctx.data_mut(|d| d.insert_temp(egui::Id::new("jx-banda-y"), arriba));
++                ctx.request_repaint();
++            }
++            pintar_banda(ui.painter(), heroe, banda_en(&ctx, arriba));
++            self.jx_heroe(ui, heroe.shrink2(vec2(PAGE_PAD, 0.0)));
++
++            let x0 = heroe.left() + PAGE_PAD;
++            let y0 = heroe.bottom() - SOLAPE;
++            let bloques = self.jx_bloques(ui, x0, y0, ancho - 2.0 * PAGE_PAD);
++            let fondo = bloques.iter().map(|(_, r)| r.bottom()).fold(heroe.bottom(), f32::max);
++            ui.allocate_exact_size(vec2(ancho, fondo - heroe.bottom() + PAGE_PAD), Sense::hover());
++            for (bloque, rect) in bloques {
++                match bloque {
++                    Bloque::Categoria(i, ids) => self.jx_tarjeta_categoria(ui, rect, &CATEGORIAS[i], &ids),
++                    Bloque::Forgenex => jx_tarjeta_forgenex(ui, rect),
++                    Bloque::Novedades => self.jx_tarjeta_novedades(ui, rect),
++                }
++            }
++        });
++    }
++
++    /// The greeting on the left and the AI box on the right.
++    fn jx_heroe(&self, ui: &mut Ui, rect: Rect) {
++        let angosto = rect.width() < 760.0;
++        let texto_w = if angosto { 262.0 } else { 330.0 };
++        let p = ui.painter();
++        let titulo = p.layout(
++            "¿Qué vas a crear hoy?".into(),
++            FontId::new(if angosto { 24.0 } else { 31.0 }, theme::bold()),
++            Color32::WHITE,
++            texto_w,
++        );
++        let mut y = rect.top() + 14.0;
++        let alto_titulo = titulo.size().y;
++        p.galley(pos2(rect.left(), y), titulo, Color32::WHITE);
++        y += alto_titulo + 8.0;
++        let sub = p.layout(
++            "Describe tu idea y Forgenex la genera. Luego la terminas en Photonex o Filmnex.".into(),
++            FontId::new(13.5, theme::medium()),
++            Color32::from_white_alpha(220),
++            texto_w,
++        );
++        p.galley(pos2(rect.left(), y), sub, Color32::WHITE);
++        let caja = Rect::from_min_max(pos2(rect.left() + texto_w + 28.0, rect.top() + 8.0), pos2(rect.right(), rect.top() + 122.0));
++        jx_caja_ia(ui, caja);
++    }
++
++    /// Where each card of Inicio goes: four columns as wide as the window allows (two, or one,
++    /// when it is narrow), each card under the shortest column.
++    fn jx_bloques(&self, ui: &Ui, x0: f32, y0: f32, ancho: f32) -> Vec<(Bloque, Rect)> {
++        let n: usize = if ancho >= 900.0 {
++            4
++        } else if ancho >= 520.0 {
++            2
++        } else {
++            1
++        };
++        let col_w = (ancho - GAP * (n - 1) as f32) / n as f32;
++        let x = |c: usize| x0 + c as f32 * (col_w + GAP);
++        let mut bajo = vec![y0; n];
++        let mas_bajo = |bajo: &[f32]| (0..bajo.len()).min_by(|&a, &b| bajo[a].total_cmp(&bajo[b])).unwrap_or(0);
++        let mut bloques = Vec::new();
++        let visibles: Vec<&AppEntry> = self.entries.iter().filter(|e| !self.settings.hidden.contains(e.app.id)).collect();
++        let ultima = CATEGORIAS.len() - 1;
++        for (i, cat) in CATEGORIAS.iter().enumerate() {
++            // An app the launcher has no Ficha for goes with the last category.
++            let ids: Vec<String> = visibles
++                .iter()
++                .filter(|e| ficha(e.app.id).map_or(i == ultima, |f| f.categoria == cat.clave))
++                .map(|e| e.app.id.to_string())
++                .collect();
++            if ids.is_empty() {
++                continue;
++            }
++            let c = if n == CATEGORIAS.len() { i } else { mas_bajo(&bajo) };
++            let rect = Rect::from_min_size(pos2(x(c), bajo[c]), vec2(col_w, CARD_HEAD_H + APP_ROW_H * ids.len() as f32));
++            bajo[c] = rect.bottom() + GAP;
++            bloques.push((Bloque::Categoria(i, ids), rect));
++        }
++        let c = mas_bajo(&bajo);
++        let rect = Rect::from_min_size(pos2(x(c), bajo[c]), vec2(col_w, alto_forgenex(ui, col_w)));
++        bajo[c] = rect.bottom() + GAP;
++        bloques.push((Bloque::Forgenex, rect));
++        // Novedades takes two columns side by side: the pair that ends highest.
++        let span = n.min(2);
++        let (c, y) = (0..=n - span)
++            .map(|c| (c, bajo[c..c + span].iter().copied().fold(f32::MIN, f32::max)))
++            .min_by(|a, b| a.1.total_cmp(&b.1))
++            .unwrap_or((0, y0));
++        let w = col_w * span as f32 + GAP * (span - 1) as f32;
++        bloques.push((Bloque::Novedades, Rect::from_min_size(pos2(x(c), y), vec2(w, NOVEDADES_H))));
++        bloques
++    }
++
++    fn jx_tarjeta_categoria(&mut self, ui: &mut Ui, rect: Rect, cat: &Categoria, ids: &[String]) {
++        let t = Tokens::get(ui.ctx());
++        tarjeta(ui.painter(), rect, &t);
++        let p = ui.painter();
++        let cabeza = Rect::from_min_size(rect.min, vec2(rect.width(), CARD_HEAD_H));
++        let c = pos2(cabeza.left() + 22.0, cabeza.center().y);
++        let r = 6.0;
++        p.add(egui::Shape::convex_polygon(vec![c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)], cat.color, Stroke::NONE));
++        p.text(pos2(cabeza.left() + 38.0, c.y), Align2::LEFT_CENTER, cat.nombre, FontId::new(14.0, theme::bold()), t.ink_strong);
++        let cuenta = if ids.len() == 1 { "1 app".to_string() } else { format!("{} apps", ids.len()) };
++        p.text(pos2(cabeza.right() - 16.0, c.y), Align2::RIGHT_CENTER, cuenta, FontId::new(12.0, theme::semibold()), t.faint);
++        p.hline(rect.x_range(), cabeza.bottom() - 0.5, Stroke::new(1.0, separador(&t)));
++        for (k, id) in ids.iter().enumerate() {
++            let fila = Rect::from_min_size(pos2(rect.left(), cabeza.bottom() + k as f32 * APP_ROW_H), vec2(rect.width(), APP_ROW_H));
++            if k > 0 {
++                ui.painter().hline(fila.left() + 16.0..=fila.right() - 16.0, fila.top(), Stroke::new(1.0, separador(&t)));
++            }
++            if let Some(entry) = self.entry(id).cloned() {
++                self.jx_fila_inicio(ui, fila, &entry);
++            }
++        }
++    }
++
++    /// One app on a card of Inicio: its icon, name and state, and a small button. The row
++    /// itself opens the app's page in Apps.
++    fn jx_fila_inicio(&mut self, ui: &mut Ui, fila: Rect, e: &AppEntry) {
++        let t = Tokens::get(ui.ctx());
++        let ctx = ui.ctx().clone();
++        let id = e.app.id.to_string();
++        let status = e.status(self.platform, self.caps.manage_apps);
++        let resp = ui.interact(fila, egui::Id::new(("jx-inicio-app", e.app.id)), Sense::click());
++        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, e.app.name));
++        let hover = ctx.animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12);
++        if hover > 0.0 {
++            ui.painter().rect_filled(fila.shrink2(vec2(6.0, 3.0)), CornerRadius::same(10), theme::tint(t.ink_strong, 0.045 * hover));
++        }
++        if resp.hovered() {
++            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
++        }
++        let pronto = status == AppStatus::NoRelease;
++        let icono = Rect::from_min_size(pos2(fila.left() + 16.0, fila.center().y - 17.0), vec2(34.0, 34.0));
++        if let Some(img) = crate::icons::app_image(&ctx, e.app.id, !pronto) {
++            let img = if pronto { img.tint(Color32::from_white_alpha(140)) } else { img };
++            img.paint_at(ui, icono);
++        }
++        let x = icono.right() + 12.0;
++        let p = ui.painter();
++        p.text(
++            pos2(x, fila.center().y - 8.0),
++            Align2::LEFT_CENTER,
++            e.app.name,
++            FontId::new(13.5, theme::semibold()),
++            if pronto { t.muted } else { t.ink_strong },
++        );
++        let (estado, color) = self.jx_estado_inicio(&t, e, &status);
++        p.text(pos2(x, fila.center().y + 9.0), Align2::LEFT_CENTER, estado, FontId::new(11.5, theme::medium()), color);
++
++        let derecha = fila.right() - 14.0;
++        let mut accion = None;
++        if e.job.is_some() {
++            let pista = Rect::from_min_size(pos2(derecha - 64.0, fila.center().y - 2.5), vec2(64.0, 5.0));
++            p.rect_filled(pista, CornerRadius::same(3), t.line);
++            let f = fraccion(e.job).unwrap_or_else(|| (ui.input(|i| i.time) as f32 * 0.7).fract());
++            p.rect_filled(Rect::from_min_size(pista.min, vec2(pista.width() * f, 5.0)), CornerRadius::same(3), t.accent);
++            ctx.request_repaint();
++        } else if let Some((texto, primario, a)) = self.jx_accion_corta(e, &status) {
++            let boton = boton_chico(ui, egui::Id::new(("jx-inicio-boton", e.app.id)), derecha, fila.center().y, texto, primario, &t);
++            if boton.clicked() {
++                accion = Some(a);
++            }
++        }
++        match accion {
++            Some(Accion::Instalar) => self.install_app(&id),
++            Some(Accion::Abrir) => self.launch_app(&id),
++            Some(Accion::Url(url)) => ctx.open_url(egui::OpenUrl::new_tab(url)),
++            None if resp.clicked() => {
++                self.jx_elegir(&ctx, &id);
++                ctx.data_mut(|d| d.insert_temp(egui::Id::new(EN_APPS), true));
++            }
++            None => {}
++        }
++    }
++
++    /// The small button of a row on Inicio; `None` when there is nothing to do from here.
++    fn jx_accion_corta(&self, e: &AppEntry, status: &AppStatus) -> Option<(&'static str, bool, Accion)> {
++        if e.paused.is_some() && self.caps.manage_apps {
++            return Some(("Continuar", true, Accion::Instalar));
++        }
++        match self.primary_action(e, status) {
++            Primary::Open => Some(("Abrir", false, Accion::Abrir)),
++            Primary::Install => Some(("Instalar", true, Accion::Instalar)),
++            Primary::Update(_) => Some(("Actualizar", true, Accion::Instalar)),
++            Primary::Retry(_) => Some(("Reintentar", true, Accion::Instalar)),
++            Primary::Download(url) => Some(("Descargar", true, Accion::Url(url))),
++            Primary::Unavailable(_) => None,
++        }
++    }
++
++    /// The line under an app's name on Inicio, and its colour.
++    fn jx_estado_inicio(&self, t: &Tokens, e: &AppEntry, status: &AppStatus) -> (String, Color32) {
++        if let Some(job) = e.job {
++            let texto = match job {
++                JobPhase::Downloading { .. } | JobPhase::Reconnecting { .. } => match fraccion(Some(job)) {
++                    Some(f) => format!("Descargando {} %", (f * 100.0).round() as u32),
++                    None => "Descargando…".into(),
++                },
++                JobPhase::Verifying => "Comprobando la descarga…".into(),
++                JobPhase::Waiting => "En cola…".into(),
++                JobPhase::Installing => "Instalando…".into(),
++                JobPhase::Removing => "Desinstalando…".into(),
++            };
++            return (texto, t.accent_ink);
++        }
++        if e.paused.is_some() {
++            return ("Descarga en pausa".into(), t.warn);
++        }
++        match status {
++            AppStatus::UpdateAvailable => (format!("Nueva: {}", e.latest_label().unwrap_or_default()), t.accent_ink),
++            AppStatus::UpToDate | AppStatus::Installed => {
++                (e.installed_label().map(|v| format!("Instalada · {v}")).unwrap_or_else(|| "Instalada".into()), t.muted)
++            }
++            AppStatus::Available => (self.jx_tamano(e).map(widgets::human_bytes).unwrap_or_else(|| "Disponible".into()), t.muted),
++            AppStatus::NoRelease => ("Próximamente".into(), t.faint),
++            AppStatus::Checking => ("Comprobando…".into(), t.faint),
++            AppStatus::Unavailable => ("No disponible".into(), t.faint),
++        }
++    }
++
++    /// The latest releases of the suite, newest first; each opens its release notes.
++    fn jx_tarjeta_novedades(&mut self, ui: &mut Ui, rect: Rect) {
++        let t = Tokens::get(ui.ctx());
++        let ctx = ui.ctx().clone();
++        tarjeta(ui.painter(), rect, &t);
++        let cabeza = Rect::from_min_size(rect.min, vec2(rect.width(), CARD_HEAD_H));
++        ui.painter().text(pos2(cabeza.left() + 16.0, cabeza.center().y), Align2::LEFT_CENTER, "Novedades", FontId::new(14.0, theme::bold()), t.ink_strong);
++        let enlace = "Ver todas las apps";
++        let fuente = FontId::new(12.5, theme::semibold());
++        let ancho_enlace = ui.painter().layout_no_wrap(enlace.into(), fuente.clone(), t.accent_ink).size().x;
++        let zona = Rect::from_min_max(pos2(cabeza.right() - 16.0 - ancho_enlace, cabeza.top() + 8.0), pos2(cabeza.right() - 16.0, cabeza.bottom() - 8.0));
++        let resp = ui.interact(zona, egui::Id::new("jx-novedades-todas"), Sense::click());
++        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, enlace));
++        let tinta = if resp.hovered() { t.ink_strong } else { t.accent_ink };
++        ui.painter().text(zona.right_center(), Align2::RIGHT_CENTER, enlace, fuente, tinta);
++        if resp.hovered() {
++            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
++        }
++        if resp.clicked() {
++            ctx.data_mut(|d| d.insert_temp(egui::Id::new(EN_APPS), true));
++        }
++        ui.painter().hline(rect.x_range(), cabeza.bottom() - 0.5, Stroke::new(1.0, separador(&t)));
++
++        let now = self.backend.now();
++        let mut recientes: Vec<(AppEntry, i64)> = self
++            .entries
++            .iter()
++            .filter(|e| !self.settings.hidden.contains(e.app.id))
++            .filter_map(|e| e.release().and_then(|r| r.published_at).map(|at| (e.clone(), at)))
++            .collect();
++        recientes.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
++        let huecos = if rect.width() < 420.0 { 2 } else { 4 };
++        recientes.truncate(huecos);
++        let dentro = Rect::from_min_max(pos2(rect.left() + 16.0, cabeza.bottom() + 14.0), pos2(rect.right() - 16.0, rect.bottom() - 14.0));
++        if recientes.is_empty() {
++            ui.painter().text(
++                dentro.center(),
++                Align2::CENTER_CENTER,
++                "Aquí verás las últimas versiones de las apps.",
++                FontId::new(13.0, theme::medium()),
++                t.muted,
++            );
++            return;
++        }
++        let hueco_w = (dentro.width() - 10.0 * (huecos - 1) as f32) / huecos as f32;
++        let mut abrir = None;
++        for (k, (e, at)) in recientes.iter().enumerate() {
++            let caja = Rect::from_min_size(pos2(dentro.left() + k as f32 * (hueco_w + 10.0), dentro.top()), vec2(hueco_w, 96.0));
++            let todo = caja.with_max_y(dentro.bottom());
++            let resp = ui.interact(todo, egui::Id::new(("jx-novedad", e.app.id)), Sense::click());
++            let etiqueta = format!("Novedades de {}", e.app.name);
++            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &etiqueta));
++            let color = theme::rgb(e.app.color);
++            let claro = mezcla(color, Color32::WHITE, 0.55);
++            let p = ui.painter();
++            pintar_redondeado(p, caja, 10.0, Degradado::css(caja, 135.0, [(0.0, claro), (1.0, color), (1.0, color)]));
++            if resp.hovered() {
++                p.rect_filled(caja, CornerRadius::same(10), Color32::from_white_alpha(28));
++                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
++            }
++            if let Some(img) = crate::icons::app_image(&ctx, e.app.id, true) {
++                img.paint_at(ui, Rect::from_center_size(caja.center(), vec2(44.0, 44.0)));
++            }
++            let p = ui.painter();
++            let nombre = format!("{} {}", e.app.name, e.latest_label().unwrap_or_default());
++            p.text(pos2(caja.left() + 2.0, caja.bottom() + 16.0), Align2::LEFT_CENTER, nombre, FontId::new(12.5, theme::semibold()), t.ink_strong);
++            let cuando = crate::views::ago_text(*at, now);
++            p.text(pos2(caja.left() + 2.0, caja.bottom() + 33.0), Align2::LEFT_CENTER, cuando, FontId::new(11.5, theme::medium()), t.faint);
++            if resp.clicked() {
++                abrir = Some(e.app.id.to_string());
++            }
++        }
++        if let Some(id) = abrir {
++            self.dialog = Some(Dialog::Notes(id));
++        }
++    }
++}
++
++
++/// Inicio or Apps.
++fn en_apps(ctx: &egui::Context) -> bool {
++    ctx.data(|d| d.get_temp(egui::Id::new(EN_APPS))).unwrap_or(false)
++}
++
++/// A card of Inicio.
++enum Bloque {
++    /// The index in `CATEGORIAS` and the apps on it.
++    Categoria(usize, Vec<String>),
++    Forgenex,
++    Novedades,
++}
++
++/// What a row's small button on Inicio does.
++enum Accion {
++    Instalar,
++    Abrir,
++    Url(String),
++}
++
++fn fondo_pagina(t: &Tokens) -> Color32 {
++    if t.dark { t.bg } else { t.sunken }
++}
++
++fn color_tarjeta(t: &Tokens) -> Color32 {
++    if t.dark { t.sunken } else { t.bg }
++}
++
++fn separador(t: &Tokens) -> Color32 {
++    if t.dark { t.line } else { mezcla(t.bg, t.line, 0.6) }
++}
++
++/// A white card with a soft shadow (a hairline in the dark theme).
++fn tarjeta(p: &Painter, rect: Rect, t: &Tokens) {
++    if !t.dark {
++        let sombra = egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_rgba_unmultiplied(11, 26, 51, 22) };
++        p.add(sombra.as_shape(rect, CornerRadius::same(CARD_RADIUS)));
++    }
++    let borde = if t.dark { Stroke::new(1.0, t.line) } else { Stroke::NONE };
++    p.rect(rect, CornerRadius::same(CARD_RADIUS), color_tarjeta(t), borde, StrokeKind::Inside);
++}
++
++/// A linear gradient like CSS's `linear-gradient(<angle>, …)` over a rectangle, with three
++/// stops (repeat the last one for two).
++#[derive(Clone, Copy)]
++struct Degradado {
++    origen: Pos2,
++    eje: egui::Vec2,
++    colores: [(f32, Color32); 3],
++}
++
++impl Degradado {
++    fn css(rect: Rect, grados: f32, colores: [(f32, Color32); 3]) -> Self {
++        let a = grados.to_radians();
++        let dir = vec2(a.sin(), -a.cos());
++        let largo = ((rect.width() * a.sin()).abs() + (rect.height() * a.cos()).abs()).max(1.0);
++        Self { origen: rect.center() - dir * largo / 2.0, eje: dir / largo, colores }
++    }
++
++    fn color(&self, p: Pos2) -> Color32 {
++        let u = (p - self.origen).dot(self.eje).clamp(0.0, 1.0);
++        for par in self.colores.windows(2) {
++            let ((a, ca), (b, cb)) = (par[0], par[1]);
++            if u <= b {
++                return if b > a { mezcla(ca, cb, (u - a) / (b - a)) } else { cb };
++            }
++        }
++        self.colores[2].1
++    }
++}
++
++/// The band's gradient and its hexagons, in the part `rect` of the whole band `banda`.
++fn pintar_banda(p: &Painter, rect: Rect, banda: Rect) {
++    let d = Degradado::css(banda, 115.0, [(0.0, AZUL_OSCURO), (0.55, AZUL), (1.0, AZUL_CLARO)]);
++    let (nx, ny) = (24u32, 6u32);
++    let mut mesh = egui::Mesh::default();
++    for j in 0..=ny {
++        for i in 0..=nx {
++            let q = pos2(
++                rect.left() + rect.width() * i as f32 / nx as f32,
++                rect.top() + rect.height() * j as f32 / ny as f32,
++            );
++            mesh.colored_vertex(q, d.color(q));
++        }
++    }
++    for j in 0..ny {
++        for i in 0..nx {
++            let a = j * (nx + 1) + i;
++            mesh.add_triangle(a, a + 1, a + nx + 2);
++            mesh.add_triangle(a, a + nx + 2, a + nx + 1);
++        }
++    }
++    p.add(mesh);
++    pintar_hexagonos(&p.with_clip_rect(rect.intersect(p.clip_rect())), rect, banda);
++}
++
++/// The brand's hexagon pattern in white, fading in from the left of the band.
++fn pintar_hexagonos(p: &Painter, rect: Rect, banda: Rect) {
++    let (w, h) = (56.0, 97.0);
++    let x0 = banda.left() + ((rect.left() - banda.left()) / w).floor() * w - w;
++    let mut y = banda.top() + ((rect.top() - banda.top()) / h).floor() * h - h;
++    while y < rect.bottom() {
++        let mut x = x0;
++        while x < rect.right() + w {
++            let f = (((x + 28.0 - banda.left()) / banda.width() - 0.2) / 0.8).clamp(0.0, 1.0);
++            if f > 0.02 {
++                let s = Stroke::new(1.0, Color32::from_white_alpha((26.0 * f) as u8));
++                let q = |a: f32, b: f32| pos2(x + a, y + b);
++                p.add(egui::Shape::closed_line(vec![q(28.0, 0.0), q(56.0, 16.0), q(56.0, 48.0), q(28.0, 64.0), q(0.0, 48.0), q(0.0, 16.0)], s));
++                p.line_segment([q(28.0, 64.0), q(28.0, 97.0)], s);
++                p.line_segment([q(0.0, 48.0), q(-28.0, 64.0)], s);
++                p.line_segment([q(56.0, 48.0), q(84.0, 64.0)], s);
++            }
++            x += w;
++        }
++        y += h;
++    }
++}
++
++/// The whole band, as wide as the window, starting at `arriba`.
++fn banda_en(ctx: &egui::Context, arriba: f32) -> Rect {
++    let pantalla = ctx.content_rect();
++    Rect::from_min_size(pos2(pantalla.left(), arriba), vec2(pantalla.width(), BANDA_H))
++}
++
++/// The outline of a rounded rectangle, clockwise from the right edge.
++fn contorno(rect: Rect, radio: f32) -> Vec<Pos2> {
++    let r = radio.min(rect.width() / 2.0).min(rect.height() / 2.0);
++    let esquinas = [
++        (pos2(rect.right() - r, rect.bottom() - r), 0.0f32),
++        (pos2(rect.left() + r, rect.bottom() - r), 90.0),
++        (pos2(rect.left() + r, rect.top() + r), 180.0),
++        (pos2(rect.right() - r, rect.top() + r), 270.0),
++    ];
++    let mut puntos = Vec::with_capacity(36);
++    for (c, desde) in esquinas {
++        for k in 0..=8 {
++            let a = (desde + 90.0 * k as f32 / 8.0).to_radians();
++            puntos.push(c + vec2(r * a.cos(), r * a.sin()));
++        }
++    }
++    puntos
++}
++
++/// A rounded rectangle filled with a gradient, with a smooth edge.
++fn pintar_redondeado(p: &Painter, rect: Rect, radio: f32, d: Degradado) {
++    let puntos = contorno(rect, radio);
++    let mut mesh = egui::Mesh::default();
++    let c = rect.center();
++    mesh.colored_vertex(c, d.color(c));
++    for q in &puntos {
++        mesh.colored_vertex(*q, d.color(*q));
++    }
++    let n = puntos.len() as u32;
++    for i in 0..n {
++        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
++    }
++    p.add(mesh);
++    let borde = egui::epaint::PathStroke::new_uv(1.0, move |_, q| d.color(q));
++    p.add(egui::epaint::PathShape { points: puntos, closed: true, fill: Color32::TRANSPARENT, stroke: borde });
++}
++
++/// A pill of the header's navigation, white on the band.
++fn pildora(ui: &mut Ui, texto: &str, activa: bool) -> egui::Response {
++    let fuente = FontId::new(13.5, theme::semibold());
++    let ancho = ui.painter().layout_no_wrap(texto.to_string(), fuente.clone(), Color32::WHITE).size().x;
++    let (rect, resp) = ui.allocate_exact_size(vec2(ancho + 28.0, 32.0), Sense::click());
++    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12);
++    let fondo = if activa { 0.18 } else { 0.10 * hover };
++    if fondo > 0.0 {
++        ui.painter().rect_filled(rect, CornerRadius::same(16), Color32::from_white_alpha((255.0 * fondo) as u8));
++    }
++    let tinta = if activa || resp.hovered() { Color32::WHITE } else { Color32::from_white_alpha(195) };
++    ui.painter().text(rect.center(), Align2::CENTER_CENTER, texto, fuente, tinta);
++    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, activa, texto));
++    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++/// A filled pill of the header: translucent white, or solid white with blue text (`fuerte`).
++fn pildora_llena(ui: &mut Ui, texto: &str, fuerte: bool) -> egui::Response {
++    let fuente = FontId::new(13.0, theme::bold());
++    let ancho = ui.painter().layout_no_wrap(texto.to_string(), fuente.clone(), Color32::WHITE).size().x;
++    let (rect, resp) = ui.allocate_exact_size(vec2(ancho + 30.0, 34.0), Sense::click());
++    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12);
++    let (fondo, tinta) = if fuerte {
++        (mezcla(Color32::WHITE, AZUL_CLARO, 0.12 * hover), AZUL)
++    } else {
++        (Color32::from_white_alpha((255.0 * (0.16 + 0.08 * hover)) as u8), Color32::WHITE)
++    };
++    ui.painter().rect_filled(rect, CornerRadius::same(17), fondo);
++    ui.painter().text(rect.center(), Align2::CENTER_CENTER, texto, fuente, tinta);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, texto));
++    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++/// A round icon button, white on the band.
++fn icono_blanco(ui: &mut Ui, simbolo: &str, tip: &str, ocupado: bool) -> egui::Response {
++    let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
++    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12);
++    if hover > 0.0 {
++        ui.painter().circle_filled(rect.center(), 17.0, Color32::from_white_alpha((255.0 * 0.16 * hover) as u8));
++    }
++    let tinta = if ocupado {
++        ui.ctx().request_repaint();
++        let pulso = 0.6 + 0.4 * (ui.input(|i| i.time) as f32 * 4.0).sin().abs();
++        Color32::from_white_alpha((255.0 * pulso) as u8)
++    } else {
++        Color32::WHITE
++    };
++    ui.painter().text(rect.center(), Align2::CENTER_CENTER, simbolo, FontId::proportional(17.0), tinta);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
++    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++/// Minimise, maximise and close, drawn white for the band (the window has no system title bar).
++fn botones_ventana(ui: &mut Ui, alto: f32) {
++    let ctx = ui.ctx().clone();
++    let maximizada = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
++    // Right to left: close, maximise or restore, minimise.
++    for (i, etiqueta) in [tl!("Close"), if maximizada { tl!("Restore") } else { tl!("Maximize") }, tl!("Minimize")]
++        .into_iter()
++        .enumerate()
++    {
++        let (rect, _) = ui.allocate_exact_size(vec2(46.0, alto), Sense::hover());
++        // Clickable below the window's resize band along the top (and, for close, the right edge).
++        let hit = Rect::from_min_max(rect.min + vec2(0.0, 5.0), rect.max - vec2(if i == 0 { 5.0 } else { 0.0 }, 0.0));
++        let resp = ui.interact(hit, ui.id().with(("jx-ventana", i)), Sense::click());
++        let p = ui.painter();
++        if resp.hovered() {
++            let fondo = if i == 0 { Color32::from_rgb(0xc4, 0x2b, 0x1c) } else { Color32::from_white_alpha(38) };
++            p.rect_filled(rect, CornerRadius::ZERO, fondo);
++        }
++        let c = rect.center();
++        let s = 5.0;
++        let trazo = Stroke::new(1.0, Color32::WHITE);
++        match i {
++            0 => {
++                p.line_segment([c + vec2(-s, -s), c + vec2(s, s)], trazo);
++                p.line_segment([c + vec2(-s, s), c + vec2(s, -s)], trazo);
++            }
++            1 if maximizada => {
++                let frente = Rect::from_min_size(c + vec2(-s, -s + 2.0), vec2(2.0 * s - 2.0, 2.0 * s - 2.0));
++                p.rect_stroke(frente, CornerRadius::same(1), trazo, StrokeKind::Inside);
++                p.hline(c.x - s + 2.0..=c.x + s, c.y - s, trazo);
++                p.vline(c.x + s, c.y - s..=c.y + s - 2.0, trazo);
++            }
++            1 => {
++                p.rect_stroke(Rect::from_center_size(c, vec2(2.0 * s, 2.0 * s)), CornerRadius::same(1), trazo, StrokeKind::Inside);
++            }
++            _ => {
++                p.hline(c.x - s..=c.x + s, c.y, trazo);
++            }
++        }
++        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, etiqueta));
++        let resp = resp.on_hover_text(etiqueta);
++        if resp.clicked() {
++            match i {
++                0 => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
++                1 => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximizada)),
++                _ => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
++            }
++        }
++    }
++}
++
++/// The small button at the end of a row on Inicio, its right edge at `derecha`.
++fn boton_chico(ui: &mut Ui, id: egui::Id, derecha: f32, centro_y: f32, texto: &str, primario: bool, t: &Tokens) -> egui::Response {
++    let fuente = FontId::new(12.0, theme::semibold());
++    let ancho = ui.painter().layout_no_wrap(texto.to_string(), fuente.clone(), t.ink).size().x + 24.0;
++    let rect = Rect::from_min_max(pos2(derecha - ancho, centro_y - 14.0), pos2(derecha, centro_y + 14.0));
++    let resp = ui.interact(rect, id, Sense::click());
++    let hover = ui.ctx().animate_bool_with_time(id.with("hover"), resp.hovered(), 0.12);
++    let (fondo, tinta) = if primario {
++        (mezcla(t.accent, AZUL_OSCURO, 0.35 * hover), Color32::WHITE)
++    } else {
++        (theme::tint(t.ink_strong, 0.07 + 0.05 * hover), t.ink_strong)
++    };
++    ui.painter().rect_filled(rect, CornerRadius::same(8), fondo);
++    ui.painter().text(rect.center(), Align2::CENTER_CENTER, texto, fuente, tinta);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, texto));
++    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++/// The AI box: what to make, image or video, and a button that takes it to Forgenex on the web.
++fn jx_caja_ia(ui: &mut Ui, caja: Rect) {
++    let t = Tokens::get(ui.ctx());
++    let ctx = ui.ctx().clone();
++    let p = ui.painter();
++    let sombra = egui::epaint::Shadow { offset: [0, 14], blur: 40, spread: 0, color: Color32::from_rgba_unmultiplied(5, 20, 70, 70) };
++    p.add(sombra.as_shape(caja, CornerRadius::same(CARD_RADIUS)));
++    p.rect_filled(caja, CornerRadius::same(CARD_RADIUS), color_tarjeta(&t));
++    let dentro = caja.shrink2(vec2(16.0, 14.0));
++
++    let id_idea = egui::Id::new("jx-idea");
++    let id_video = egui::Id::new("jx-idea-video");
++    let id_campo = egui::Id::new("jx-idea-campo");
++    let mut idea: String = ctx.data(|d| d.get_temp(id_idea)).unwrap_or_default();
++    let mut video: bool = ctx.data(|d| d.get_temp(id_video)).unwrap_or(false);
++    let en_campo = ctx.memory(|m| m.has_focus(id_campo));
++    // Enter sends the idea; Shift+Enter makes a new line.
++    let mut enviar = en_campo && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
++
++    let campo = Rect::from_min_size(dentro.min, vec2(dentro.width(), 46.0));
++    let antes = idea.clone();
++    ui.scope_builder(UiBuilder::new().max_rect(campo).layout(Layout::top_down(Align::Min)), |ui| {
++        egui::ScrollArea::vertical().id_salt("jx-idea-scroll").max_height(campo.height()).show(ui, |ui| {
++            ui.add(
++                egui::TextEdit::multiline(&mut idea)
++                    .id(id_campo)
++                    .frame(egui::Frame::NONE)
++                    .margin(Margin::ZERO)
++                    .desired_rows(2)
++                    .desired_width(campo.width())
++                    .char_limit(4000)
++                    .font(FontId::new(14.5, theme::medium()))
++                    .text_color(t.ink_strong)
++                    .hint_text(RichText::new("Ej.: una zapatilla blanca flotando sobre un fondo celeste, luz de estudio…").color(t.faint)),
++            );
++        });
++    });
++
++    let fila_y = dentro.bottom() - 19.0;
++    let mut x = dentro.left();
++    for (texto, es_video) in [("Imagen", false), ("Video", true)] {
++        let fuente = FontId::new(12.5, theme::semibold());
++        let ancho = ui.painter().layout_no_wrap(texto.into(), fuente.clone(), t.ink).size().x + 24.0;
++        let rect = Rect::from_min_size(pos2(x, fila_y - 15.0), vec2(ancho, 30.0));
++        let resp = ui.interact(rect, egui::Id::new(("jx-idea-tipo", es_video)), Sense::click());
++        let activo = video == es_video;
++        let (fondo, tinta) = if activo {
++            (mezcla(color_tarjeta(&t), VIOLETA, if t.dark { 0.3 } else { 0.11 }), if t.dark { Color32::WHITE } else { VIOLETA_TINTA })
++        } else {
++            (theme::tint(t.ink_strong, if resp.hovered() { 0.09 } else { 0.05 }), t.ink)
++        };
++        ui.painter().rect_filled(rect, CornerRadius::same(15), fondo);
++        ui.painter().text(rect.center(), Align2::CENTER_CENTER, texto, fuente, tinta);
++        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, activo, texto));
++        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
++            video = es_video;
++        }
++        x = rect.right() + 8.0;
++    }
++
++    let texto = "Generar en Forgenex";
++    let fuente = FontId::new(13.5, theme::bold());
++    let ancho = ui.painter().layout_no_wrap(texto.into(), fuente.clone(), Color32::WHITE).size().x + 36.0;
++    let boton = Rect::from_min_max(pos2(dentro.right() - ancho, fila_y - 19.0), pos2(dentro.right(), fila_y + 19.0));
++    let resp = ui.interact(boton, egui::Id::new("jx-idea-generar"), Sense::click());
++    let p = ui.painter();
++    pintar_redondeado(p, boton, 10.0, Degradado::css(boton, 90.0, [(0.0, AZUL), (1.0, VIOLETA), (1.0, VIOLETA)]));
++    if resp.hovered() {
++        p.rect_filled(boton, CornerRadius::same(10), Color32::from_black_alpha(26));
++    }
++    p.text(boton.center(), Align2::CENTER_CENTER, texto, fuente, Color32::WHITE);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, texto));
++    if resp.on_hover_text("Se abre Forgenex en tu navegador con esta idea").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
++        enviar = true;
++    }
++
++    if enviar {
++        ctx.open_url(egui::OpenUrl::new_tab(url_forgenex(&idea, video)));
++    }
++    if idea != antes {
++        ctx.data_mut(|d| d.insert_temp(id_idea, idea));
++    }
++    ctx.data_mut(|d| d.insert_temp(id_video, video));
++}
++
++/// Forgenex's page with the idea filled in (`?tipo=imagen|video&prompt=…`).
++fn url_forgenex(idea: &str, video: bool) -> String {
++    use std::fmt::Write as _;
++    let mut url = format!("{FORGENEX_URL}?tipo={}", if video { "video" } else { "imagen" });
++    let idea = idea.trim();
++    if !idea.is_empty() {
++        url.push_str("&prompt=");
++        for b in idea.bytes() {
++            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
++                url.push(char::from(b));
++            } else {
++                let _ = write!(url, "%{b:02X}");
++            }
++        }
++    }
++    url
++}
++
++/// The Forgenex card's texts, laid out for a card `ancho` wide.
++fn textos_forgenex(ui: &Ui, ancho: f32) -> [Arc<Galley>; 3] {
++    let w = ancho - 36.0;
++    let p = ui.painter();
++    [
++        p.layout("FORGENEX · IA".into(), FontId::new(11.0, theme::bold()), Color32::from_white_alpha(210), w),
++        p.layout("Imágenes y videos con IA".into(), FontId::new(16.0, theme::bold()), Color32::WHITE, w),
++        p.layout(
++            "Créalos en la web y termínalos en tus apps. Pagas solo los créditos que usas.".into(),
++            FontId::new(12.5, theme::medium()),
++            Color32::from_white_alpha(220),
++            w,
++        ),
++    ]
++}
++
++fn alto_forgenex(ui: &Ui, ancho: f32) -> f32 {
++    let [a, b, c] = textos_forgenex(ui, ancho);
++    18.0 + a.size().y + 6.0 + b.size().y + 6.0 + c.size().y + 16.0 + 34.0 + 18.0
++}
++
++/// Forgenex, the suite's AI on the web, and its plans.
++fn jx_tarjeta_forgenex(ui: &mut Ui, rect: Rect) {
++    let t = Tokens::get(ui.ctx());
++    let p = ui.painter();
++    if !t.dark {
++        let sombra = egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_rgba_unmultiplied(75, 47, 209, 60) };
++        p.add(sombra.as_shape(rect, CornerRadius::same(CARD_RADIUS)));
++    }
++    pintar_redondeado(p, rect, f32::from(CARD_RADIUS), Degradado::css(rect, 150.0, [(0.0, VIOLETA_OSCURO), (1.0, VIOLETA_CLARO), (1.0, VIOLETA_CLARO)]));
++    let x = rect.left() + 18.0;
++    let mut y = rect.top() + 18.0;
++    let [a, b, c] = textos_forgenex(ui, rect.width());
++    for (g, despues) in [(a, 6.0), (b, 6.0), (c, 0.0)] {
++        let alto = g.size().y;
++        p.galley(pos2(x, y), g, Color32::WHITE);
++        y += alto + despues;
++    }
++    let boton = Rect::from_min_max(pos2(x, rect.bottom() - 18.0 - 34.0), pos2(rect.right() - 18.0, rect.bottom() - 18.0));
++    let resp = ui.interact(boton, egui::Id::new("jx-forgenex-planes"), Sense::click());
++    let fondo = if resp.hovered() { mezcla(Color32::WHITE, VIOLETA_CLARO, 0.12) } else { Color32::WHITE };
++    ui.painter().rect_filled(boton, CornerRadius::same(10), fondo);
++    ui.painter().text(boton.center(), Align2::CENTER_CENTER, "Ver planes", FontId::new(13.0, theme::bold()), VIOLETA_TINTA);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Ver planes"));
++    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
++        ui.ctx().open_url(egui::OpenUrl::new_tab(PLANES_URL));
++    }
 +}
 +
 +/// The stage's big main button, in the brand blue.
@@ -2573,6 +3403,17 @@ index 0000000..91b342d
 +    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.invert_fg);
 +    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, texto));
 +    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::url_forgenex;
++
++    #[test]
++    fn la_idea_va_en_la_direccion() {
++        assert_eq!(url_forgenex("  ", false), "https://jacnex.com/app?tipo=imagen");
++        assert_eq!(url_forgenex("Café & sol\n", true), "https://jacnex.com/app?tipo=video&prompt=Caf%C3%A9%20%26%20sol");
++    }
 +}
 diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 index f2f8cf2..3522bdd 100644
@@ -2812,9 +3653,18 @@ index a8f9bc6..11b879b 100644
      for (name, bytes, coords, family) in faces {
          // No subpixel binning: these fonts carry no hinting instructions, so a glyph drawn at a
 diff --git a/crates/ui-egui/src/views.rs b/crates/ui-egui/src/views.rs
-index fb8adc1..9bbe95a 100644
+index fb8adc1..bbf38fe 100644
 --- a/crates/ui-egui/src/views.rs
 +++ b/crates/ui-egui/src/views.rs
+@@ -16,7 +16,7 @@ use crate::theme::{self, Tokens, rgb, tint};
+ use crate::widgets::{self, Kind};
+ 
+ /// Translate a relative timestamp ("just now", "5 min ago", …) into the current language.
+-fn ago_text(secs: i64, now: i64) -> String {
++pub(crate) fn ago_text(secs: i64, now: i64) -> String {
+     match time::ago_kind(secs, now) {
+         time::TimeAgo::JustNow => t("just now").to_string(),
+         time::TimeAgo::Minutes(n) => tn(n, "{n} min ago", "{n} min ago"),
 @@ -36,7 +36,7 @@ pub(crate) fn date_text(secs: i64) -> String {
  }
  
@@ -3070,10 +3920,10 @@ index 0326672..a3f0a31 100644
          Glyph::Close => {
 diff --git a/crates/ui-egui/tests/jacnex_capturas.rs b/crates/ui-egui/tests/jacnex_capturas.rs
 new file mode 100644
-index 0000000..1081831
+index 0000000..46086f2
 --- /dev/null
 +++ b/crates/ui-egui/tests/jacnex_capturas.rs
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,170 @@
 +//! Captures of Jacnex Studio's window, drawn off screen: no real backend, nothing on the desktop.
 +//! Run with JACNEX_STUDIO_SNAPSHOTS=<folder> to save them; without it the test only draws.
 +
@@ -3159,10 +4009,11 @@ index 0000000..1081831
 +    ev
 +}
 +
-+fn capturar(nombre: &str, theme: egui::Theme, elegir: Option<&'static str>, downloading: bool) {
++/// `elegir`: an app's page in Apps; `None`: Inicio.
++fn capturar(nombre: &str, theme: egui::Theme, elegir: Option<&'static str>, downloading: bool, tamano: egui::Vec2) {
 +    jacnex_studio_ui_egui::i18n::set_test_lang(jacnex_studio_ui_egui::i18n::Lang::ES);
 +    let mut backend: Option<Box<dyn Backend>> = Some(Box::new(Fake { events: events(downloading) }));
-+    let mut harness = Harness::builder().with_size(egui::vec2(1180.0, 720.0)).with_theme(theme).build_ui_state(
++    let mut harness = Harness::builder().with_size(tamano).with_theme(theme).build_ui_state(
 +        move |ui, launcher: &mut Option<LauncherUi>| {
 +            if launcher.is_none()
 +                && let Some(b) = backend.take()
@@ -3176,7 +4027,10 @@ index 0000000..1081831
 +                };
 +                *launcher = Some(LauncherUi::new(ui.ctx(), b, s));
 +                if let Some(id) = elegir {
-+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("jx-elegida"), id.to_string()));
++                    ui.ctx().data_mut(|d| {
++                        d.insert_temp(egui::Id::new("jx-elegida"), id.to_string());
++                        d.insert_temp(egui::Id::new("jx-en-apps"), true);
++                    });
 +                }
 +            }
 +            if let Some(l) = launcher.as_mut() {
@@ -3196,7 +4050,8 @@ index 0000000..1081831
 +    }
 +}
 +
-+/// Choosing another app in the shelf used to lock the egui context twice and hang the window.
++/// Choosing another app used to lock the egui context twice and hang the window. The first click
++/// is on Inicio's row, which opens Apps; the others are on the shelf.
 +#[test]
 +fn elegir_otra_app_no_bloquea() {
 +    jacnex_studio_ui_egui::i18n::set_test_lang(jacnex_studio_ui_egui::i18n::Lang::ES);
@@ -3222,13 +4077,20 @@ index 0000000..1081831
 +        let elegida: Option<String> = harness.ctx.data(|d| d.get_temp(egui::Id::new("jx-elegida")));
 +        let esperada = SUITE.iter().find(|a| a.name == nombre).map(|a| a.id.to_string());
 +        assert_eq!(elegida, esperada, "{nombre}");
++        let en_apps: Option<bool> = harness.ctx.data(|d| d.get_temp(egui::Id::new("jx-en-apps")));
++        assert_eq!(en_apps, Some(true), "{nombre}");
 +    }
 +}
 +
 +#[test]
 +fn capturas_del_launcher() {
-+    capturar("claro-photonex", egui::Theme::Light, Some("photocraft"), false);
-+    capturar("claro-filmnex-descargando", egui::Theme::Light, Some("filmcraft"), true);
-+    capturar("oscuro-lightnex", egui::Theme::Dark, Some("lightcraft"), false);
-+    capturar("claro-protonex", egui::Theme::Light, Some("figcraft"), false);
++    let normal = egui::vec2(1180.0, 720.0);
++    capturar("claro-inicio", egui::Theme::Light, None, true, normal);
++    capturar("oscuro-inicio", egui::Theme::Dark, None, false, normal);
++    capturar("claro-inicio-angosto", egui::Theme::Light, None, false, egui::vec2(760.0, 640.0));
++    capturar("claro-inicio-alto", egui::Theme::Light, None, false, egui::vec2(1180.0, 900.0));
++    capturar("claro-photonex", egui::Theme::Light, Some("photocraft"), false, normal);
++    capturar("claro-filmnex-descargando", egui::Theme::Light, Some("filmcraft"), true, normal);
++    capturar("oscuro-lightnex", egui::Theme::Dark, Some("lightcraft"), false, normal);
++    capturar("claro-protonex", egui::Theme::Light, Some("figcraft"), false, normal);
 +}
