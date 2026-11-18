@@ -84,9 +84,12 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      # La clave lleva bibliotecas.py: si cambian sus ajustes, la caché no trae craft-update, egui-winit
+      # ni winit compilados sin ellos (borrarlos no bastó: 0.19.4 salió sin compilarlos de nuevo).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src
+          key: ajustes-${{ hashFiles('jb/rebrand/bibliotecas.py') }}
 
       # Después de la caché: cambia la copia descargada de craft-update (actualizarse sin firma, y
       # que las apps pongan al día un Jacnex Studio atascado).
