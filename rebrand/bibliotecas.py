@@ -21,6 +21,13 @@ cada app de Jacnex, al abrirse en Windows, revisa el Jacnex Studio instalado y, 
 lo actualiza a la última versión (obligatorio, con aviso y la ventana de Windows Installer).
 
 Ajuste: escribir "@" en Windows (ver TECLADO).
+
+Ajuste: Jacnex Studio reconoce su propio MSI (ver AJUSTES_MSI). craft-update solo trata como "el
+launcher" a artcraft-launcher (con su carpeta anotada en HKCU, Learning Machines LLC) y solo cuenta
+los instaladores publicados por "Learning Machines LLC". Jacnex Studio 0.19.3 y 0.19.4 no
+encontraban su instalación (publicada por "Jacnex") y decían "Windows lists this app's
+installation more than once or not at all". Ahora se actualiza como el launcher de ArtCraft. Las
+apps ponen al día también esas dos versiones (ver MODULO).
 """
 
 import os
@@ -68,13 +75,49 @@ AJUSTES = [
     ),
 ]
 
+# Archivo de craft-update (junto a self_update.rs) -> ajustes, en las versiones que lo tienen.
+AJUSTES_MSI = {
+    "msi_copy.rs": [
+        # Jacnex Studio es el launcher: con su MSI en su carpeta se actualiza sin contar productos.
+        (
+            "        let is_launcher = app.id == crate::suite::LAUNCHER.id;\n",
+            "        // Jacnex: Jacnex Studio también es el launcher.\n"
+            "        let is_launcher = app.id == crate::suite::LAUNCHER.id || app.id == \"jacnex-studio\";\n",
+        ),
+        # La carpeta que el MSI de Jacnex anota en HKCU\Software\Jacnex\<app>.
+        (
+            "        let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!(r\"Software\\Learning Machines LLC\\{}\", app.name)).ok()?;\n",
+            "        // Jacnex: el MSI de Jacnex anota su carpeta en HKCU\\Software\\Jacnex\\<app>.\n"
+            "        let key = RegKey::predef(HKEY_CURRENT_USER)\n"
+            "            .open_subkey(format!(r\"Software\\Jacnex\\{}\", app.name))\n"
+            "            .or_else(|_| RegKey::predef(HKEY_CURRENT_USER).open_subkey(format!(r\"Software\\Learning Machines LLC\\{}\", app.name)))\n"
+            "            .ok()?;\n",
+        ),
+        # Otro texto: así las apps distinguen un Jacnex Studio sin este ajuste (ver MODULO).
+        (
+            "    \"Windows lists this app's installation more than once or not at all, so it can't tell which copy to update. Use the app's installer instead.\";\n",
+            "    \"Windows registra esta app más de una vez o ninguna, así que no se sabe qué copia actualizar. Usa el instalador de la app.\";\n",
+        ),
+    ],
+    "detect.rs": [
+        # Los instaladores de Jacnex los publica "Jacnex".
+        (
+            "    publisher == PUBLISHER && app.names().any(|n| n == display_name)\n",
+            "    // Jacnex: los instaladores de Jacnex los publica \"Jacnex\".\n"
+            "    (publisher == PUBLISHER || publisher == \"Jacnex\") && app.names().any(|n| n == display_name)\n",
+        ),
+    ],
+}
+
 INICIO_MODULO = "// --- Jacnex: las apps ponen al día un Jacnex Studio atascado"
 
 # Se agrega al final de self_update.rs. Solo Windows: ahí se repartió Jacnex Studio 0.19.2.
 MODULO = INICIO_MODULO + r''' (agregado por Jacnex) ---------------
 
 /// Jacnex Studio 0.19.2 y anteriores salieron con la comprobación de firma de ArtCraft: sin firma
-/// digital no se actualizan solos ("isn't signed ... so it doesn't install updates"). Cada app de
+/// digital no se actualizan solos ("isn't signed ... so it doesn't install updates"). 0.19.3 y
+/// 0.19.4 no reconocen su propio MSI ("Windows lists this app's installation more than once or not
+/// at all"). Cada app de
 /// Jacnex, al abrirse, revisa el Jacnex Studio instalado y, si es uno de esos, descarga el MSI de
 /// la última versión de jacnexstudio/jacnex-studio, lo comprueba con el SHA-256 publicado, avisa,
 /// cierra Jacnex Studio, lo instala con la ventana de progreso de Windows Installer (por usuario,
@@ -93,8 +136,10 @@ mod jacnex_launcher {
     const EXE: &str = "jacnex-studio.exe";
     const CLAVE: &str = r"Software\Jacnex\Jacnex Studio";
     const DESCARGAS: &str = "https://github.com/jacnexstudio/jacnex-studio/releases/latest/download/";
-    /// Solo lo tiene un Jacnex Studio que exige firma digital para actualizarse.
-    const ATASCADO: &[u8] = b"so it doesn't install updates";
+    /// Textos que solo tiene un Jacnex Studio que no puede actualizarse solo: el que exige firma
+    /// digital y el que no reconoce su propio MSI. Escritos al revés: este código también va dentro
+    /// de Jacnex Studio, que si no los tendría siempre.
+    const ATASCADO: [&str; 2] = ["setadpu llatsni t'nseod ti os", "lla ta ton ro ecno naht erom noitallatsni s'ppa siht stsil swodniW"];
     /// Entre un intento y el siguiente: varias apps abiertas a la vez no lo hacen dos veces.
     const ENTRE_INTENTOS: Duration = Duration::from_secs(10 * 60);
     const AVISO: &str = "Hay una versión nueva de Jacnex Studio y es obligatoria. Jacnex Studio se cerrará unos segundos mientras se instala y luego se abrirá solo.";
@@ -121,7 +166,11 @@ mod jacnex_launcher {
     }
 
     fn atascado(exe: &Path) -> bool {
-        std::fs::read(exe).is_ok_and(|datos| datos.windows(ATASCADO.len()).any(|w| w == ATASCADO))
+        let Ok(datos) = std::fs::read(exe) else { return false };
+        ATASCADO.iter().any(|al_reves| {
+            let texto: Vec<u8> = al_reves.bytes().rev().collect();
+            datos.windows(texto.len()).any(|w| w == texto.as_slice())
+        })
     }
 
     fn reciente(marca: &Path) -> bool {
@@ -216,8 +265,32 @@ def ajustar(archivo):
         if n != 1:
             raise ErrorDeAjuste(f"{archivo}: se esperaba 1 coincidencia de {viejo[:80]!r} y hay {n}")
         texto = texto.replace(viejo, nuevo)
-    if INICIO_MODULO not in texto:
+    if MODULO not in texto:
+        # Una copia con un módulo anterior recibe el nuevo.
+        if INICIO_MODULO in texto:
+            texto = texto[: texto.index(INICIO_MODULO)]
         texto = texto.rstrip("\n") + "\n\n" + MODULO
+    cambio = texto != antes
+    if cambio:
+        archivo.write_text(texto, encoding="utf-8", newline="")
+    for nombre, ajustes in AJUSTES_MSI.items():
+        otro = archivo.with_name(nombre)
+        if otro.exists() and aplicar(otro, ajustes):
+            cambio = True
+    return cambio
+
+
+def aplicar(archivo, ajustes):
+    """Como ajustar, para los archivos de AJUSTES_MSI."""
+    texto = archivo.read_text(encoding="utf-8")
+    antes = texto
+    for viejo, nuevo in ajustes:
+        if nuevo in texto:
+            continue
+        n = texto.count(viejo)
+        if n != 1:
+            raise ErrorDeAjuste(f"{archivo}: se esperaba 1 coincidencia de {viejo[:80]!r} y hay {n}")
+        texto = texto.replace(viejo, nuevo)
     if texto == antes:
         return False
     archivo.write_text(texto, encoding="utf-8", newline="")

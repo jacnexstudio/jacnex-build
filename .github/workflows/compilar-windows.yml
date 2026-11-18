@@ -135,6 +135,9 @@ jobs:
             if ($texto.Contains("so it doesn't install updates")) {
               throw "$($exe.Name) tiene craft-update sin ajustar: no se actualizaría sin firma digital"
             }
+            if ($texto.Contains("Windows lists this app's installation more than once or not at all")) {
+              throw "$($exe.Name) tiene craft-update sin ajustar: no reconocería su propio MSI de Jacnex"
+            }
             if ($texto.Contains('JacnexSuite/LauncherUpdate')) { $ponenAlDia++ }
             Write-Output "$($exe.Name): craft-update ajustado"
           }
