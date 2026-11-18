@@ -1,0 +1,1393 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 860de3aae..d0cac4e2f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5830,6 +5830,7 @@ dependencies = [
+  "tempfile",
+  "toml",
+  "unicode-bidi",
++ "ureq",
+  "web-time",
+  "winsafe",
+ ]
+diff --git a/crates/engine/src/jacnex_ia.rs b/crates/engine/src/jacnex_ia.rs
+new file mode 100644
+index 000000000..e3071c8fb
+--- /dev/null
++++ b/crates/engine/src/jacnex_ia.rs
+@@ -0,0 +1,136 @@
++//! Jacnex: what Photonex's built-in AI (`photocraft-ui-egui`'s `jacnex_ia`) needs from the
++//! document: the area it works on, that area's pixels as the person sees them, and the result
++//! placed back as a new layer (masked by the selection, one undo step).
++
++use photocraft_color::PixelFormat;
++use photocraft_doc::{Document, Layer, LayerId, LayerMask};
++use photocraft_geom::Rect;
++use photocraft_raster::Surface;
++
++use crate::{EngineError, Result, Session};
++
++/// The area the AI looks at and draws in, in document pixels.
++#[derive(Clone, Debug)]
++pub struct Zone {
++    /// What is sent to the model: the selection's bounds and some of what surrounds them (so it
++    /// can match light and perspective), or the whole canvas without a selection.
++    pub context: Rect,
++    /// The selection's bounds inside the canvas; `None` without a selection.
++    pub selected: Option<Rect>,
++    /// The selection itself (coverage), to mask the new layer with.
++    pub selection: Option<Surface>,
++}
++
++/// The area of the active document: see [`Zone`]. `margin` is the share of the selection's size
++/// added on each side as context (0.25 = a quarter). `None` without a document or when the
++/// selection lies outside the canvas.
++pub fn zone(s: &Session, margin: f32) -> Option<Zone> {
++    let d = s.active()?;
++    let canvas = d.doc.bounds();
++    if canvas.is_empty() {
++        return None;
++    }
++    let Some(sel) = d.doc.selection.as_ref() else { return Some(Zone { context: canvas, selected: None, selection: None }) };
++    let bounds = sel.content_bounds().intersect(&canvas);
++    if bounds.is_empty() {
++        return None;
++    }
++    let pad = |len: u32| ((len as f32 * margin.clamp(0.0, 2.0)).round() as i32).max(0);
++    let (px, py) = (pad(bounds.width()), pad(bounds.height()));
++    let context = Rect::new(
++        bounds.x0.saturating_sub(px),
++        bounds.y0.saturating_sub(py),
++        bounds.x1.saturating_add(px),
++        bounds.y1.saturating_add(py),
++    )
++    .intersect(&canvas);
++    Some(Zone { context, selected: Some(bounds), selection: Some(sel.clone()) })
++}
++
++/// The visible composite (what the canvas shows, without the checkerboard) in `r`, as RGBA8.
++pub fn composite_rgba8(doc: &Document, r: Rect) -> Vec<[u8; 4]> {
++    let fmt = doc.pixel_format();
++    let flat = photocraft_compose::flatten_to_surface(doc, PixelFormat::new(fmt.mode, fmt.sample, true), None);
++    let mut px = vec![[0u8; 4]; r.width() as usize * r.height() as usize];
++    flat.read_rgba8_into(r, &mut px);
++    px
++}
++
++/// The coverage of `selection` in `r` (0 = not selected, 255 = selected), one byte a pixel.
++pub fn coverage(selection: &Surface, r: Rect) -> Vec<u8> {
++    let mut px = vec![[0u8; 4]; r.width() as usize * r.height() as usize];
++    selection.read_rgba8_into(r, &mut px);
++    px.into_iter().map(|p| p[0]).collect()
++}
++
++/// Adds `rgba` (interleaved RGBA8 covering `r`) to the active document as a new layer named
++/// `name` above the active one, masked by `mask` (a selection) when given. One history step
++/// labelled `label`; the selection stays, as after Generative Fill in the reference application.
++pub fn place(s: &mut Session, label: &str, name: &str, r: Rect, rgba: &[u8], mask: Option<&Surface>) -> Result<LayerId> {
++    if r.is_empty() || rgba.len() != r.width() as usize * r.height() as usize * 4 {
++        return Err(EngineError::Other("the generated image does not match its area".into()));
++    }
++    let d = s.active().ok_or(EngineError::NoDocument)?;
++    let fmt = d.doc.pixel_format();
++    let target = PixelFormat::new(fmt.mode, fmt.sample, true);
++    let mut surface = Surface::from_interleaved(PixelFormat::RGBA8, r, rgba);
++    if surface.format() != target {
++        surface = surface.try_convert(target)?;
++    }
++    surface.prune();
++    let mask = mask.map(|m| crate::commands::mask_at_depth(LayerMask { surface: m.clone(), ..LayerMask::reveal_all() }, d.doc.depth)).transpose()?;
++    s.edit(label, |doc, active| {
++        let mut layer = Layer::raster(name, target);
++        *crate::pixels_mut(&mut layer)? = surface;
++        layer.mask = mask;
++        let id = crate::layer_place::insert_new(doc, *active, layer, crate::layer_place::Place::AutoEditable);
++        *active = Some(id);
++        Ok(id)
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn session() -> Session {
++        let mut s = Session::new();
++        s.execute("file.new", json!({"width": 64, "height": 48, "background": "white"})).unwrap();
++        s
++    }
++
++    #[test]
++    fn without_a_selection_the_zone_is_the_canvas() {
++        let s = session();
++        let z = zone(&s, 0.25).unwrap();
++        assert_eq!(z.context, Rect::new(0, 0, 64, 48));
++        assert!(z.selected.is_none());
++    }
++
++    #[test]
++    fn a_selection_adds_context_inside_the_canvas_and_masks_the_new_layer() {
++        let mut s = session();
++        s.execute("select.rect", json!({"x": 40, "y": 10, "width": 20, "height": 20, "antiAlias": false})).unwrap();
++        let z = zone(&s, 0.25).unwrap();
++        assert_eq!(z.selected, Some(Rect::new(40, 10, 60, 30)));
++        assert_eq!(z.context, Rect::new(35, 5, 64, 35));
++        let layers = s.active().unwrap().doc.layers.len();
++        let px = [200u8, 200, 200, 255].repeat(z.context.width() as usize * z.context.height() as usize);
++        let id = place(&mut s, "Generative Fill", "IA", z.context, &px, z.selection.as_ref()).unwrap();
++        let d = s.active().unwrap();
++        assert_eq!(d.doc.layers.len(), layers + 1);
++        assert_eq!(d.active_layer, Some(id));
++        assert!(d.doc.layer(id).unwrap().mask.is_some());
++        assert!(d.doc.selection.is_some());
++        let shown = composite_rgba8(&d.doc, Rect::new(0, 0, 64, 48));
++        assert_eq!(shown[20 * 64 + 50], [200, 200, 200, 255], "inside the selection: the new pixels");
++        assert_ne!(shown[20 * 64 + 36][0], 200, "outside it the mask hides them");
++    }
++
++    #[test]
++    fn a_wrong_size_is_an_error_not_a_panic() {
++        let mut s = session();
++        assert!(place(&mut s, "x", "x", Rect::new(0, 0, 4, 4), &[0; 10], None).is_err());
++    }
++}
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 783d19f77..f4e85708d 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -27,6 +27,7 @@ pub mod inspect;
+ pub mod installed_profiles;
+ pub mod jobs;
+ pub mod kys;
++pub mod jacnex_ia;
+ pub mod layer_place;
+ pub mod layer_style;
+ pub mod link_watch;
+diff --git a/crates/engine/src/shell_commands.rs b/crates/engine/src/shell_commands.rs
+index 9ebf979c3..6b42ed264 100644
+--- a/crates/engine/src/shell_commands.rs
++++ b/crates/engine/src/shell_commands.rs
+@@ -93,6 +93,8 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+     ("window.theme.softLight", "Soft", &["Window", "Theme", "Light Theme"], None),
+     ("window.theme.system", "Sync with system", &["Window", "Theme"], None),
+     ("edit.search", "Search…", &["Edit"], Some("Cmd+F")),
++    // Jacnex: la IA integrada (`photocraft-ui-egui`'s `jacnex_ia`), after Content-Aware Fill.
++    ("jacnex.ia", "Relleno generativo (IA)…", &["Edit"], None),
+     ("help.discord", "Join the Jacnex WhatsApp group…", &["Help"], None),
+     ("help.website", "Photonex Website", &["Help"], None),
+     ("help.jacnexWebsite", "Jacnex Website", &["Help"], None),
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index 10b1838ea..5419b1ab5 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -54,6 +54,9 @@ web-time = { workspace = true }
+ # Floating panels open in their own OS windows on the desktop; the web keeps them in the page.
+ craft-ui = { workspace = true, features = ["native-windows"] }
+ craft-update = { workspace = true }
++# Jacnex: the built-in AI (`jacnex_ia`) talks to app.jacnex.store; ureq is already in the graph
++# through craft-update, with the same features.
++ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "_ring", "gzip", "platform-verifier"] }
+ rayon = { workspace = true }
+ # Safe native UI-language APIs (Windows/macOS); no subprocess or web dependency.
+ sys-locale = "=0.3.2"
+diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
+index a8cf267e4..be14308d6 100644
+--- a/crates/ui-egui/src/app.rs
++++ b/crates/ui-egui/src/app.rs
+@@ -230,6 +230,7 @@ impl PhotocraftApp {
+             min_frame_ms: None,
+             last_frame_start_ms: 0.0,
+             jobs: Default::default(),
++            jacnex_ia: Default::default(),
+             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+             live_tokens: theme::live::LiveTokens::from_env(),
+         };
+diff --git a/crates/ui-egui/src/app/frame.rs b/crates/ui-egui/src/app/frame.rs
+index e805f16fe..6ca97fe05 100644
+--- a/crates/ui-egui/src/app/frame.rs
++++ b/crates/ui-egui/src/app/frame.rs
+@@ -361,6 +361,7 @@ impl PhotocraftApp {
+             analysis_ui::windows(self, &ctx);
+             timeline_ui::windows(self, &ctx);
+             workspace_ui::windows(self, &ctx);
++            crate::jacnex_ia::ventana(self, &ctx);
+         }
+         palette::show(self, &ctx);
+         dialogs::show(self, &ctx);
+diff --git a/crates/ui-egui/src/canvas.rs b/crates/ui-egui/src/canvas.rs
+index 49053405f..83e830587 100644
+--- a/crates/ui-egui/src/canvas.rs
++++ b/crates/ui-egui/src/canvas.rs
+@@ -1697,6 +1697,8 @@ fn paint_primary_overlays(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut
+         // above, the stored camera wins over this frame's copy, or the write-back drops it.
+         let before = app.ui.views.get(idx).cloned();
+         crate::crop_task_bar::draw(app, ui, xf);
++        // Jacnex: la barra «✦ Relleno generativo» bajo la selección (la de Recortar tiene prioridad).
++        crate::jacnex_ia::barra(app, ui, xf);
+         if let Some(now) = app.ui.views.get(idx)
+             && Some(now) != before.as_ref()
+         {
+diff --git a/crates/ui-egui/src/jacnex_ia.rs b/crates/ui-egui/src/jacnex_ia.rs
+new file mode 100644
+index 000000000..4446e574e
+--- /dev/null
++++ b/crates/ui-egui/src/jacnex_ia.rs
+@@ -0,0 +1,878 @@
++//! Jacnex: la IA integrada de Photonex (piloto con Google Nano Banana).
++//!
++//! Funciona como el Relleno generativo de la aplicación de referencia, pero explicado paso a paso:
++//!
++//! - **Con una selección**: se envía la zona seleccionada (más un margen alrededor, para que la
++//!   IA respete luz y perspectiva) y una máscara; el resultado vuelve como una **capa nueva**
++//!   recortada por la selección, justo encima de la capa activa. Ctrl+Z la quita.
++//! - **Sin selección**: o se edita la imagen entera, o se crea una imagen nueva que ocupa el
++//!   lienzo; también como capa nueva.
++//!
++//! Se abre desde Edición › Relleno generativo (IA)… o desde la barra contextual que aparece bajo
++//! la selección (como la barra de tareas contextual de Recortar). La red va en un hilo aparte:
++//! la interfaz nunca se congela. El servidor es app.jacnex.store (`/v1/jacnex/*`), con la llave de
++//! la sesión iniciada en Jacnex Studio. Los créditos se descuentan en el servidor, que los devuelve
++//! si la generación falla.
++
++use std::sync::mpsc::{Receiver, TryRecvError};
++use std::time::{Duration, Instant};
++
++use egui::{Color32, RichText};
++use photocraft_doc::DocId;
++use photocraft_engine::jacnex_ia as motor;
++use photocraft_geom::Rect;
++use photocraft_raster::Surface;
++
++use crate::PhotocraftApp;
++use crate::canvas::ViewXform;
++use crate::widgets::task_bar;
++
++/// El modelo del piloto.
++pub const MODELO: &str = "nano-banana";
++const MODELO_NOMBRE: &str = "Google Nano Banana";
++/// El lado largo de lo que se envía: más no mejora el resultado y tarda más en subir.
++const MAX_LADO: u32 = 1536;
++/// El contexto alrededor de la selección, como fracción de su tamaño.
++const MARGEN: f32 = 0.15;
++
++/// Ideas de un clic para quien no sabe qué escribir.
++const IDEAS_SELECCION: &[&str] = &["un cielo al atardecer", "flores de colores", "quitar el objeto", "un sombrero elegante", "agua cristalina"];
++const IDEAS_LIENZO: &[&str] = &["estilo acuarela", "de noche con luces de neón", "foto de producto con fondo de estudio", "estilo ilustración 3D"];
++
++/// Qué hacer cuando no hay selección.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
++pub enum SinSeleccion {
++    /// Cambiar la imagen entera según la indicación.
++    #[default]
++    EditarTodo,
++    /// Una imagen nueva (solo texto), del tamaño del lienzo.
++    CrearNueva,
++}
++
++/// La cuenta y el saldo, según el servidor.
++#[derive(Clone, Debug)]
++struct Info {
++    nombre: String,
++    creditos: i64,
++    costo: i64,
++    costo_edicion: i64,
++}
++
++/// Lo que el hilo de red le cuenta a la interfaz.
++enum Evento {
++    Etapa(&'static str),
++    Cobrado { saldo: Option<i64> },
++    Listo { rgba: Vec<u8>, ancho: u32, alto: u32 },
++    Error(String),
++}
++
++/// Una generación en marcha (o lista, esperando a que su documento vuelva a estar activo).
++struct Trabajo {
++    doc: DocId,
++    zona: Rect,
++    mascara: Option<Surface>,
++    nombre_capa: String,
++    inicio: Instant,
++    etapa: &'static str,
++    rx: Receiver<Evento>,
++    listo: Option<(Vec<u8>, u32, u32)>,
++}
++
++/// El estado de la IA en la app.
++#[derive(Default)]
++pub struct Estado {
++    /// La ventana «IA de Jacnex» está abierta.
++    pub abierta: bool,
++    /// La indicación (prompt), compartida por la ventana y la barra contextual.
++    pub prompt: String,
++    /// La barra contextual muestra el campo de texto.
++    barra_expandida: bool,
++    pub sin_seleccion: SinSeleccion,
++    info: Option<Info>,
++    info_error: Option<String>,
++    info_rx: Option<Receiver<Result<Info, String>>>,
++    trabajo: Option<Trabajo>,
++    /// El último aviso: (salió bien, texto).
++    aviso: Option<(bool, String)>,
++    /// Hay una sesión de Jacnex Studio (se vuelve a mirar al abrir la ventana o actualizar).
++    con_sesion: bool,
++    /// Un servidor de pruebas en esta máquina, en lugar de la cuenta de Jacnex Studio
++    /// ([`usar_servidor_local`]).
++    local: Option<(String, String)>,
++    /// Los límites de la selección para la barra, con lo que identifica esa selección: medirlos
++    /// recorre sus píxeles, así que no se repite en cada cuadro.
++    limites: Option<((DocId, u64, Rect), Option<Rect>)>,
++}
++
++/// Usa un Forgenex de pruebas en esta máquina (`http://127.0.0.1:…` o `http://localhost:…`) con
++/// la llave `llave`, en lugar de la sesión de Jacnex Studio. Otras direcciones se rechazan.
++pub fn usar_servidor_local(app: &mut PhotocraftApp, servidor: &str, llave: &str) -> bool {
++    let ok = es_local(servidor) && llave.starts_with("jk_");
++    if ok {
++        app.jacnex_ia.local = Some((servidor.trim_end_matches('/').to_string(), llave.to_string()));
++    }
++    ok
++}
++
++// --- Cuenta y servidor -----------------------------------------------------------------------
++
++struct Conexion {
++    servidor: String,
++    llave: String,
++}
++
++/// El servidor: app.jacnex.store. `JACNEX_IA_SERVIDOR` solo puede apuntar a esta misma máquina
++/// (pruebas con un Forgenex local); cualquier otro valor se ignora.
++fn servidor() -> String {
++    match std::env::var("JACNEX_IA_SERVIDOR") {
++        Ok(s) if es_local(&s) => s.trim_end_matches('/').to_string(),
++        _ => "https://app.jacnex.store".to_string(),
++    }
++}
++
++fn es_local(url: &str) -> bool {
++    url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")
++}
++
++/// La llave de la sesión de Jacnex Studio (`%LOCALAPPDATA%\Jacnex Studio\cuenta.json`). Con un
++/// servidor local de pruebas vale `JACNEX_IA_LLAVE`.
++fn conexion(e: &Estado) -> Option<Conexion> {
++    if let Some((servidor, llave)) = &e.local {
++        return Some(Conexion { servidor: servidor.clone(), llave: llave.clone() });
++    }
++    let servidor = servidor();
++    if es_local(&servidor)
++        && let Ok(llave) = std::env::var("JACNEX_IA_LLAVE")
++    {
++        return llave.starts_with("jk_").then_some(Conexion { servidor, llave });
++    }
++    let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).or_else(|| {
++        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
++    })?;
++    let texto = std::fs::read_to_string(base.join("Jacnex Studio").join("cuenta.json")).ok()?;
++    let v: serde_json::Value = serde_json::from_str(&texto).ok()?;
++    let llave = v.get("llave")?.as_str()?.to_string();
++    llave.starts_with("jk_").then_some(Conexion { servidor, llave })
++}
++
++// --- Red (escritorio) -------------------------------------------------------------------------
++
++#[cfg(not(target_arch = "wasm32"))]
++mod red {
++    use super::{Conexion, Evento, Info, MODELO, es_local};
++    use std::sync::mpsc::Sender;
++    use std::time::{Duration, Instant};
++
++    const LIMITE_JSON: u64 = 1024 * 1024;
++    const LIMITE_IMAGEN: u64 = 48 * 1024 * 1024;
++
++    fn agente(segundos: u64, https: bool) -> ureq::Agent {
++        ureq::Agent::config_builder()
++            .tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build())
++            .https_only(https)
++            .timeout_global(Some(Duration::from_secs(segundos)))
++            .http_status_as_error(false)
++            .user_agent("Photonex")
++            .build()
++            .new_agent()
++    }
++
++    fn agente_para(c: &Conexion, segundos: u64) -> ureq::Agent {
++        agente(segundos, !es_local(&c.servidor))
++    }
++
++    /// El cuerpo JSON de una respuesta; los errores del servidor (`{error:{message}}`) como texto.
++    fn json(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<serde_json::Value, String> {
++        let mut r = r.map_err(|e| format!("No se pudo conectar con Jacnex: {e}"))?;
++        let estado = r.status().as_u16();
++        let texto = r.body_mut().with_config().limit(LIMITE_JSON).read_to_string().map_err(|e| format!("Respuesta incompleta: {e}"))?;
++        let v: serde_json::Value = serde_json::from_str(&texto).unwrap_or(serde_json::Value::Null);
++        if (200..300).contains(&estado) {
++            return Ok(v);
++        }
++        let msg = v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string);
++        Err(match (estado, msg) {
++            (401, _) => "Tu sesión de Jacnex venció. Vuelve a iniciar sesión en Jacnex Studio.".into(),
++            (_, Some(m)) => m,
++            _ => format!("El servidor respondió {estado}."),
++        })
++    }
++
++    pub fn info(c: &Conexion) -> Result<Info, String> {
++        let url = format!("{}/v1/jacnex/estado?modelo={MODELO}", c.servidor);
++        let v = json(agente_para(c, 20).get(&url).header("Authorization", &format!("Bearer {}", c.llave)).call())?;
++        let n = |p: &str| v.pointer(p).and_then(|x| x.as_i64()).unwrap_or(0);
++        Ok(Info {
++            nombre: v.get("nombre").and_then(|x| x.as_str()).unwrap_or("").to_string(),
++            creditos: n("/creditos"),
++            costo: n("/modelo/costo"),
++            costo_edicion: n("/modelo/costoEdicion"),
++        })
++    }
++
++    /// Un cuerpo multipart/form-data: campos de texto y archivos PNG.
++    fn multipart(campos: &[(&str, &str)], archivos: &[(&str, &str, &[u8])]) -> (String, Vec<u8>) {
++        let semilla = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
++        let limite = format!("----photonex{semilla:x}{:x}", archivos.iter().map(|a| a.2.len()).sum::<usize>());
++        let mut b = Vec::new();
++        for (k, v) in campos {
++            b.extend_from_slice(format!("--{limite}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
++        }
++        for (k, nombre, datos) in archivos {
++            b.extend_from_slice(
++                format!("--{limite}\r\nContent-Disposition: form-data; name=\"{k}\"; filename=\"{nombre}\"\r\nContent-Type: image/png\r\n\r\n").as_bytes(),
++            );
++            b.extend_from_slice(datos);
++            b.extend_from_slice(b"\r\n");
++        }
++        b.extend_from_slice(format!("--{limite}--\r\n").as_bytes());
++        (format!("multipart/form-data; boundary={limite}"), b)
++    }
++
++    pub struct Pedido {
++        pub conexion: Conexion,
++        pub prompt: String,
++        pub tamano: String,
++        pub imagenes: Vec<Vec<u8>>,
++    }
++
++    /// Crea el trabajo, espera el resultado y lo descarga; todo lo cuenta por `tx`.
++    pub fn generar(p: Pedido, tx: &Sender<Evento>) -> Result<(), String> {
++        let c = &p.conexion;
++        let auth = format!("Bearer {}", c.llave);
++        let _ = tx.send(Evento::Etapa("Enviando la imagen…"));
++        let archivos: Vec<(&str, &str, &[u8])> =
++            p.imagenes.iter().enumerate().map(|(i, d)| ("image", if i == 0 { "imagen.png" } else { "mascara.png" }, d.as_slice())).collect();
++        let (tipo, cuerpo) = multipart(&[("model", MODELO), ("prompt", &p.prompt), ("size", &p.tamano)], &archivos);
++        let url = format!("{}/v1/jacnex/generar", c.servidor);
++        let v = json(agente_para(c, 120).post(&url).header("Authorization", &auth).header("Content-Type", &tipo).send(&cuerpo[..]))?;
++        let id = v.get("id").and_then(|x| x.as_str()).ok_or("El servidor no devolvió el trabajo.")?.to_string();
++        let _ = tx.send(Evento::Cobrado { saldo: v.get("saldo").and_then(|x| x.as_i64()) });
++        let _ = tx.send(Evento::Etapa("La IA está creando…"));
++        let inicio = Instant::now();
++        let consulta = format!("{}/v1/jacnex/trabajo/{id}", c.servidor);
++        let url_resultado = loop {
++            std::thread::sleep(Duration::from_millis(1500));
++            if inicio.elapsed() > Duration::from_secs(300) {
++                return Err("La IA tardó demasiado. Si no llega, tus créditos se devuelven solos.".into());
++            }
++            let v = match json(agente_para(c, 30).get(&consulta).header("Authorization", &auth).call()) {
++                Ok(v) => v,
++                // Un corte de red momentáneo no pierde el trabajo: se vuelve a consultar.
++                Err(e) if e.starts_with("No se pudo conectar") => continue,
++                Err(e) => return Err(e),
++            };
++            match v.get("estado").and_then(|x| x.as_str()) {
++                Some("listo") => {
++                    break v.pointer("/resultados/0").and_then(|x| x.as_str()).ok_or("La IA no devolvió ninguna imagen.")?.to_string();
++                }
++                Some("fallido") => {
++                    let e = v.get("error").and_then(|x| x.as_str()).unwrap_or("La IA no pudo completar la imagen.");
++                    return Err(format!("{e} Tus créditos fueron devueltos."));
++                }
++                _ => {}
++            }
++        };
++        let _ = tx.send(Evento::Etapa("Descargando el resultado…"));
++        let local = es_local(&url_resultado) && es_local(&c.servidor);
++        if !local && !url_resultado.starts_with("https://") {
++            return Err("La dirección del resultado no es segura.".into());
++        }
++        // La llave solo viaja a Jacnex: los resultados alojados en otro sitio se piden sin ella.
++        let mut pedido = agente(120, !local).get(&url_resultado);
++        if url_resultado.starts_with(&format!("{}/", c.servidor)) {
++            pedido = pedido.header("Authorization", &auth);
++        }
++        let mut r = pedido.call().map_err(|e| format!("No se pudo descargar el resultado: {e}"))?;
++        if !r.status().is_success() {
++            return Err(format!("No se pudo descargar el resultado ({}).", r.status().as_u16()));
++        }
++        let bytes = r.body_mut().with_config().limit(LIMITE_IMAGEN).read_to_vec().map_err(|e| format!("Descarga incompleta: {e}"))?;
++        let img = photocraft_codecs::decode(&bytes).map_err(|e| format!("La imagen recibida no se pudo leer: {e}"))?;
++        let _ = tx.send(Evento::Listo { rgba: img.to_rgba8(), ancho: img.width(), alto: img.height() });
++        Ok(())
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++mod red {
++    use super::{Conexion, Evento, Info};
++    use std::sync::mpsc::Sender;
++    const SOLO_ESCRITORIO: &str = "La IA está disponible en la app de escritorio.";
++    pub struct Pedido {
++        pub conexion: Conexion,
++        pub prompt: String,
++        pub tamano: String,
++        pub imagenes: Vec<Vec<u8>>,
++    }
++    pub fn info(_: &Conexion) -> Result<Info, String> {
++        Err(SOLO_ESCRITORIO.into())
++    }
++    pub fn generar(_: Pedido, _: &Sender<Evento>) -> Result<(), String> {
++        Err(SOLO_ESCRITORIO.into())
++    }
++}
++
++/// Corre `f` en un hilo y devuelve por dónde llega su respuesta.
++fn en_hilo<T: Send + 'static>(f: impl FnOnce(std::sync::mpsc::Sender<T>) + Send + 'static) -> Receiver<T> {
++    let (tx, rx) = std::sync::mpsc::channel();
++    #[cfg(not(target_arch = "wasm32"))]
++    {
++        let _ = std::thread::Builder::new().name("jacnex-ia".into()).spawn(move || f(tx));
++    }
++    #[cfg(target_arch = "wasm32")]
++    f(tx);
++    rx
++}
++
++fn pedir_info(e: &mut Estado) {
++    if e.info_rx.is_some() {
++        return;
++    }
++    let c = conexion(e);
++    e.con_sesion = c.is_some();
++    let Some(c) = c else {
++        e.info = None;
++        e.info_error = None;
++        return;
++    };
++    e.info_rx = Some(en_hilo(move |tx| {
++        let _ = tx.send(red::info(&c));
++    }));
++}
++
++// --- Imágenes ---------------------------------------------------------------------------------
++
++/// `src` (RGBA8, `sw`×`sh`) escalada para cubrir `dw`×`dh` sin deformarse (lo que sobra se recorta
++/// del centro), con interpolación bilineal y, al reducir mucho, un promedio previo por bloques.
++fn cubrir(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
++    let mut out = vec![0u8; dw as usize * dh as usize * 4];
++    if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw as usize * sh as usize * 4 {
++        return out;
++    }
++    // Reducciones de más de la mitad: primero bloques enteros, para no perder detalle a saltos.
++    let factor = ((sw as f32 / dw as f32).min(sh as f32 / dh as f32) / 2.0).floor().max(1.0) as u32;
++    let (src, sw, sh) = if factor > 1 { reducir(src, sw, sh, factor) } else { (src.to_vec(), sw, sh) };
++    let escala = (dw as f32 / sw as f32).max(dh as f32 / sh as f32);
++    let ox = (sw as f32 - dw as f32 / escala) / 2.0;
++    let oy = (sh as f32 - dh as f32 / escala) / 2.0;
++    let px = |x: usize, y: usize, c: usize| src[(y * sw as usize + x) * 4 + c] as f32;
++    for y in 0..dh as usize {
++        let fy = (oy + (y as f32 + 0.5) / escala - 0.5).clamp(0.0, (sh - 1) as f32);
++        let (y0, ty) = (fy.floor() as usize, fy.fract());
++        let y1 = (y0 + 1).min(sh as usize - 1);
++        for x in 0..dw as usize {
++            let fx = (ox + (x as f32 + 0.5) / escala - 0.5).clamp(0.0, (sw - 1) as f32);
++            let (x0, tx) = (fx.floor() as usize, fx.fract());
++            let x1 = (x0 + 1).min(sw as usize - 1);
++            let o = (y * dw as usize + x) * 4;
++            for c in 0..4 {
++                let a = px(x0, y0, c) + (px(x1, y0, c) - px(x0, y0, c)) * tx;
++                let b = px(x0, y1, c) + (px(x1, y1, c) - px(x0, y1, c)) * tx;
++                out[o + c] = (a + (b - a) * ty).round().clamp(0.0, 255.0) as u8;
++            }
++        }
++    }
++    out
++}
++
++/// Promedio por bloques de `f`×`f`.
++fn reducir(src: &[u8], sw: u32, sh: u32, f: u32) -> (Vec<u8>, u32, u32) {
++    let (w, h) = ((sw / f).max(1), (sh / f).max(1));
++    let mut out = vec![0u8; w as usize * h as usize * 4];
++    for y in 0..h as usize {
++        for x in 0..w as usize {
++            let mut s = [0u32; 4];
++            let mut n = 0u32;
++            for yy in y * f as usize..((y + 1) * f as usize).min(sh as usize) {
++                for xx in x * f as usize..((x + 1) * f as usize).min(sw as usize) {
++                    let o = (yy * sw as usize + xx) * 4;
++                    for c in 0..4 {
++                        s[c] += src[o + c] as u32;
++                    }
++                    n += 1;
++                }
++            }
++            let o = (y * w as usize + x) * 4;
++            for c in 0..4 {
++                out[o + c] = (s[c] / n.max(1)) as u8;
++            }
++        }
++    }
++    (out, w, h)
++}
++
++/// El tamaño de envío: el de la zona, con el lado largo a lo sumo [`MAX_LADO`].
++fn tamano_envio(w: u32, h: u32) -> (u32, u32) {
++    let largo = w.max(h).max(1);
++    if largo <= MAX_LADO {
++        return (w.max(1), h.max(1));
++    }
++    let f = MAX_LADO as f32 / largo as f32;
++    (((w as f32 * f).round() as u32).max(1), ((h as f32 * f).round() as u32).max(1))
++}
++
++fn png(rgba: Vec<u8>, w: u32, h: u32) -> Result<Vec<u8>, String> {
++    let img = photocraft_codecs::Image::from_u8(w, h, photocraft_codecs::ChannelLayout::Rgba, rgba).map_err(|e| e.to_string())?;
++    photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &photocraft_codecs::EncodeOptions::default()).map_err(|e| e.to_string())
++}
++
++/// Las instrucciones para el modelo (en inglés, que es como mejor las sigue). Lo que la persona
++/// escribe va tal cual.
++fn instrucciones(pedido: &str, con_seleccion: bool, modo: SinSeleccion) -> String {
++    let pedido = pedido.trim();
++    if con_seleccion {
++        let que = if pedido.is_empty() {
++            "remove what is there and fill it naturally so it blends with its surroundings".to_string()
++        } else {
++            format!("in that area: {pedido}")
++        };
++        format!(
++            "Image 1 is a photo. Image 2 is a mask: its white area marks the region to change. Edit only that region of image 1 — {que}. \
++             Match the lighting, perspective, colors and grain of the rest of the photo. Keep everything outside the white area exactly as it is, \
++             with the same framing and size. Return only the edited photo."
++        )
++    } else {
++        match modo {
++            SinSeleccion::EditarTodo => format!("Edit this image: {pedido}. Keep the same framing and composition unless asked otherwise."),
++            SinSeleccion::CrearNueva => pedido.to_string(),
++        }
++    }
++}
++
++fn nombre_capa(pedido: &str) -> String {
++    let p = pedido.trim();
++    if p.is_empty() {
++        return "IA · Relleno".into();
++    }
++    let corto: String = p.chars().take(32).collect();
++    if corto.chars().count() < p.chars().count() { format!("IA · {corto}…") } else { format!("IA · {corto}") }
++}
++
++// --- Generar ----------------------------------------------------------------------------------
++
++/// Qué haría Generar ahora, para explicarlo antes de gastar créditos.
++struct Plan {
++    con_seleccion: bool,
++    zona: Rect,
++    costo: Option<i64>,
++}
++
++fn plan(app: &mut PhotocraftApp) -> Option<Plan> {
++    let limites = limites_seleccion(app);
++    let d = app.session.active()?;
++    let con_seleccion = limites.is_some();
++    let edita = con_seleccion || app.jacnex_ia.sin_seleccion == SinSeleccion::EditarTodo;
++    let costo = app.jacnex_ia.info.as_ref().map(|i| if edita { i.costo_edicion } else { i.costo });
++    Some(Plan { con_seleccion, zona: limites.unwrap_or_else(|| d.doc.bounds()), costo })
++}
++
++pub fn ocupado(app: &PhotocraftApp) -> bool {
++    app.jacnex_ia.trabajo.as_ref().is_some_and(|t| t.listo.is_none())
++}
++
++/// Empieza una generación con la indicación actual.
++pub fn generar(app: &mut PhotocraftApp) {
++    if app.jacnex_ia.trabajo.is_some() {
++        return;
++    }
++    match preparar(app) {
++        Ok(t) => {
++            app.jacnex_ia.aviso = None;
++            app.jacnex_ia.trabajo = Some(t);
++        }
++        Err(e) => app.jacnex_ia.aviso = Some((false, e)),
++    }
++}
++
++fn preparar(app: &PhotocraftApp) -> Result<Trabajo, String> {
++    let conexion = conexion(&app.jacnex_ia).ok_or("Inicia sesión en Jacnex Studio para usar la IA.")?;
++    let e = &app.jacnex_ia;
++    let d = app.session.active().ok_or("Abre o crea un documento primero.")?;
++    let z = motor::zone(&app.session, MARGEN).ok_or("La selección está fuera del lienzo.")?;
++    let con_seleccion = z.selected.is_some();
++    if !con_seleccion && e.prompt.trim().is_empty() {
++        return Err("Escribe qué quieres que haga la IA.".into());
++    }
++    let crear = !con_seleccion && e.sin_seleccion == SinSeleccion::CrearNueva;
++    let (w, h) = (z.context.width(), z.context.height());
++    let (ew, eh) = tamano_envio(w, h);
++    let mut imagenes = Vec::new();
++    if !crear {
++        let px: Vec<u8> = motor::composite_rgba8(&d.doc, z.context).into_iter().flatten().collect();
++        imagenes.push(png(cubrir(&px, w, h, ew, eh), ew, eh)?);
++        if let Some(sel) = z.selection.as_ref() {
++            let m: Vec<u8> = motor::coverage(sel, z.context).into_iter().flat_map(|v| [v, v, v, 255]).collect();
++            imagenes.push(png(cubrir(&m, w, h, ew, eh), ew, eh)?);
++        }
++    }
++    let pedido = red::Pedido {
++        conexion,
++        prompt: instrucciones(&e.prompt, con_seleccion, e.sin_seleccion),
++        tamano: format!("{ew}x{eh}"),
++        imagenes,
++    };
++    let rx = en_hilo(move |tx| {
++        if let Err(m) = red::generar(pedido, &tx) {
++            let _ = tx.send(Evento::Error(m));
++        }
++    });
++    Ok(Trabajo {
++        doc: d.doc.id,
++        zona: z.context,
++        mascara: z.selection,
++        nombre_capa: nombre_capa(&e.prompt),
++        inicio: Instant::now(),
++        etapa: "Preparando…",
++        rx,
++        listo: None,
++    })
++}
++
++/// Cada cuadro: recoge lo que llegó de la red y coloca el resultado en su documento.
++pub fn actualizar(app: &mut PhotocraftApp, ctx: &egui::Context) {
++    if let Some(rx) = app.jacnex_ia.info_rx.as_ref() {
++        match rx.try_recv() {
++            Ok(r) => {
++                app.jacnex_ia.info_rx = None;
++                match r {
++                    Ok(i) => {
++                        app.jacnex_ia.info = Some(i);
++                        app.jacnex_ia.info_error = None;
++                    }
++                    Err(e) => app.jacnex_ia.info_error = Some(e),
++                }
++            }
++            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(250)),
++            Err(TryRecvError::Disconnected) => app.jacnex_ia.info_rx = None,
++        }
++    }
++    let Some(t) = app.jacnex_ia.trabajo.as_mut() else { return };
++    let mut fin: Option<Result<String, String>> = None;
++    loop {
++        match t.rx.try_recv() {
++            Ok(Evento::Etapa(s)) => t.etapa = s,
++            Ok(Evento::Cobrado { saldo }) => {
++                if let (Some(i), Some(s)) = (app.jacnex_ia.info.as_mut(), saldo) {
++                    i.creditos = s;
++                }
++            }
++            Ok(Evento::Listo { rgba, ancho, alto }) => t.listo = Some((rgba, ancho, alto)),
++            Ok(Evento::Error(e)) => fin = Some(Err(e)),
++            Err(TryRecvError::Empty) => break,
++            Err(TryRecvError::Disconnected) => {
++                if t.listo.is_none() && fin.is_none() {
++                    fin = Some(Err("La generación se interrumpió.".into()));
++                }
++                break;
++            }
++        }
++    }
++    let doc = t.doc;
++    if fin.is_none() && t.listo.is_some() {
++        // El resultado va a su documento: si ahora hay otro activo, espera a que vuelva.
++        if app.session.active().is_some_and(|d| d.doc.id == doc) {
++            fin = Some(colocar(app));
++        } else if !app.session.documents().iter().any(|d| d.doc.id == doc) {
++            fin = Some(Err("El documento se cerró antes de recibir el resultado.".into()));
++        }
++    }
++    match fin {
++        Some(r) => {
++            app.jacnex_ia.trabajo = None;
++            app.jacnex_ia.aviso = Some(match r {
++                Ok(m) => (true, m),
++                Err(m) => (false, m),
++            });
++            pedir_info(&mut app.jacnex_ia);
++            ctx.request_repaint();
++        }
++        None => ctx.request_repaint_after(Duration::from_millis(200)),
++    }
++}
++
++fn colocar(app: &mut PhotocraftApp) -> Result<String, String> {
++    let Some(t) = app.jacnex_ia.trabajo.as_mut() else { return Err("Sin trabajo.".into()) };
++    let Some((rgba, ancho, alto)) = t.listo.take() else { return Err("Sin resultado.".into()) };
++    let (zona, mascara, nombre) = (t.zona, t.mascara.take(), t.nombre_capa.clone());
++    let px = cubrir(&rgba, ancho, alto, zona.width(), zona.height());
++    motor::place(&mut app.session, "Relleno generativo", &nombre, zona, &px, mascara.as_ref()).map_err(|e| e.to_string())?;
++    Ok(if mascara.is_some() {
++        "Listo: el resultado está en una capa nueva, recortada por tu selección. Ctrl+Z lo deshace; ocultando la capa comparas el antes y el después.".into()
++    } else {
++        "Listo: el resultado está en una capa nueva encima de tu imagen. Ctrl+Z lo deshace.".into()
++    })
++}
++
++// --- Ventana ----------------------------------------------------------------------------------
++
++/// Abre o cierra la ventana (Edición › Relleno generativo (IA)…).
++pub fn alternar(app: &mut PhotocraftApp) {
++    app.jacnex_ia.abierta = !app.jacnex_ia.abierta;
++    if app.jacnex_ia.abierta {
++        pedir_info(&mut app.jacnex_ia);
++    }
++}
++
++const ACENTO: Color32 = Color32::from_rgb(124, 92, 255);
++
++fn boton_generar(ui: &mut egui::Ui, costo: Option<i64>, activo: bool) -> egui::Response {
++    let texto = match costo {
++        Some(c) => format!("Generar · {c} créditos"),
++        None => "Generar".to_string(),
++    };
++    ui.add_enabled(activo, egui::Button::new(RichText::new(texto).strong().color(Color32::WHITE)).fill(ACENTO).min_size(egui::vec2(0.0, 30.0)))
++}
++
++fn progreso(ui: &mut egui::Ui, t: &Trabajo) {
++    ui.horizontal(|ui| {
++        ui.add(egui::Spinner::new());
++        let s = t.inicio.elapsed().as_secs();
++        let etapa = if t.listo.is_some() { "Listo: vuelve a su documento para colocarlo" } else { t.etapa };
++        ui.label(format!("{etapa}  {s} s"));
++    });
++    ui.small("Suele tardar entre 10 y 30 segundos. Puedes seguir usando la app mientras tanto.");
++}
++
++pub fn ventana(app: &mut PhotocraftApp, ctx: &egui::Context) {
++    actualizar(app, ctx);
++    if !app.jacnex_ia.abierta {
++        return;
++    }
++    let mut abierta = true;
++    let mut accion_generar = false;
++    let plan = plan(app);
++    let sesion = app.jacnex_ia.con_sesion;
++    egui::Window::new("IA de Jacnex")
++        .id(egui::Id::unique("jacnex-ia-ventana"))
++        .open(&mut abierta)
++        .resizable(false)
++        .collapsible(true)
++        .default_width(340.0)
++        .show(ctx, |ui| {
++            ui.set_width(340.0);
++            let e = &mut app.jacnex_ia;
++            ui.horizontal(|ui| {
++                ui.label(RichText::new(format!("Modelo: {MODELO_NOMBRE}")).strong());
++                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                    if sesion && ui.small_button("Actualizar").on_hover_text("Actualizar saldo").clicked() {
++                        pedir_info(e);
++                    }
++                    if let Some(i) = &e.info {
++                        ui.label(RichText::new(format!("{} créditos", i.creditos)).color(ACENTO).strong());
++                    }
++                });
++            });
++            if !sesion {
++                ui.separator();
++                ui.label("Para usar la IA, abre Jacnex Studio e inicia sesión con tu cuenta. Tus créditos son los de app.jacnex.store.");
++                return;
++            }
++            if let Some(i) = &e.info
++                && !i.nombre.is_empty()
++            {
++                ui.small(format!("Cuenta: {}", i.nombre));
++            }
++            if let Some(err) = &e.info_error {
++                ui.colored_label(Color32::from_rgb(230, 120, 90), err);
++            }
++            ui.separator();
++            let Some(p) = plan.as_ref() else {
++                ui.label("Abre o crea un documento para empezar.");
++                return;
++            };
++            // Paso 1: qué va a cambiar.
++            ui.label(RichText::new("1 · Dónde").strong());
++            if p.con_seleccion {
++                ui.label(format!(
++                    "Relleno generativo en tu selección ({} × {} px). Solo cambia lo seleccionado; la IA mira también un poco alrededor para que encaje.",
++                    p.zona.width(),
++                    p.zona.height()
++                ));
++            } else {
++                ui.label("No hay selección. Elige qué hacer (o selecciona una zona con el Marco o el Lazo):");
++                ui.horizontal(|ui| {
++                    ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::EditarTodo, "Editar toda la imagen");
++                    ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::CrearNueva, "Crear imagen nueva");
++                });
++            }
++            ui.add_space(4.0);
++            // Paso 2: qué pedir.
++            ui.label(RichText::new("2 · Qué quieres").strong());
++            let pista = if p.con_seleccion { "Ej.: un perro durmiendo (vacío = quitar y rellenar)" } else { "Describe la imagen o el cambio" };
++            ui.add(egui::TextEdit::multiline(&mut e.prompt).hint_text(pista).desired_rows(3).desired_width(f32::INFINITY));
++            ui.horizontal_wrapped(|ui| {
++                ui.small("Ideas:");
++                let ideas = if p.con_seleccion { IDEAS_SELECCION } else { IDEAS_LIENZO };
++                for idea in ideas {
++                    if ui.small_button(*idea).clicked() {
++                        e.prompt = if *idea == "quitar el objeto" { String::new() } else { (*idea).to_string() };
++                    }
++                }
++            });
++            ui.add_space(4.0);
++            // Paso 3: generar.
++            ui.label(RichText::new("3 · Generar").strong());
++            match e.trabajo.as_ref() {
++                Some(t) => progreso(ui, t),
++                None => {
++                    let falta_texto = !p.con_seleccion && e.prompt.trim().is_empty();
++                    if boton_generar(ui, p.costo, !falta_texto).clicked() {
++                        accion_generar = true;
++                    }
++                    if falta_texto {
++                        ui.small("Escribe una indicación para continuar.");
++                    }
++                }
++            }
++            if let Some((ok, m)) = &e.aviso {
++                ui.add_space(4.0);
++                let color = if *ok { Color32::from_rgb(110, 200, 140) } else { Color32::from_rgb(230, 120, 90) };
++                ui.colored_label(color, m);
++            }
++            ui.add_space(4.0);
++            egui::CollapsingHeader::new("¿Cómo funciona?").id_salt("jacnex-ia-ayuda").show(ui, |ui| {
++                ui.small("• Selecciona una zona (Marco, Lazo, Varita…) y escribe qué quieres ahí. Vacío = quitar lo que hay.");
++                ui.small("• El resultado llega como capa nueva con máscara: puedes moverla, pintar la máscara o borrarla.");
++                ui.small("• Sé concreto: «un gato naranja sentado» funciona mejor que «un gato».");
++                ui.small("• Si algo falla, los créditos se devuelven automáticamente.");
++                ui.small("• Truco: con una selección activa aparece la barra «Relleno generativo» debajo de ella.");
++            });
++        });
++    if !abierta {
++        app.jacnex_ia.abierta = false;
++    }
++    if accion_generar {
++        generar(app);
++    }
++}
++
++// --- Barra contextual bajo la selección ---------------------------------------------------------
++
++/// La barra se ofrece con una selección, una herramienta de selección, la opción Ventana › Barra
++/// de tareas contextual activa y sin diálogos (como la de Recortar, que tiene prioridad).
++fn barra_visible(app: &PhotocraftApp) -> bool {
++    app.ui.panels.context_task_bar
++        && app.ui.dialogs.is_empty()
++        && !crate::crop_task_bar::eligible(app)
++        && crate::canvas::tool_feedback::is_selection_tool(app.ui.tool)
++        && app.drag.is_none()
++        && app.session.active().is_some_and(|d| d.doc.selection.is_some())
++}
++
++/// Dibuja la barra bajo la selección del documento activo (desde la pasada de superposición del
++/// lienzo, en la pestaña de ese documento).
++pub fn barra(app: &mut PhotocraftApp, ui: &mut egui::Ui, xf: &ViewXform) {
++    if !barra_visible(app) {
++        app.jacnex_ia.barra_expandida = false;
++        return;
++    }
++    let Some(sel) = limites_seleccion(app) else { return };
++    let a = xf.to_screen(sel.x0 as f32, sel.y0 as f32);
++    let b = xf.to_screen(sel.x1 as f32, sel.y1 as f32);
++    let anchor = egui::Rect::from_two_pos(a, b);
++    let ctx = ui.ctx().clone();
++    let mut place = app.ui.panels.task_bar;
++    let costo = app.jacnex_ia.info.as_ref().map(|i| i.costo_edicion);
++    let shown = task_bar::show(&ctx, &mut place, anchor, xf.rect, |ui, more| contenido(app, ui, more, costo));
++    app.ui.panels.task_bar = place;
++    let Some(shown) = shown else { return };
++    if shown.hide {
++        app.ui.panels.context_task_bar = false;
++        return;
++    }
++    if shown.inner {
++        generar(app);
++    }
++}
++
++/// Los límites de la selección activa dentro del lienzo, medidos solo cuando la selección cambia.
++fn limites_seleccion(app: &mut PhotocraftApp) -> Option<Rect> {
++    let d = app.session.active()?;
++    let sel = d.doc.selection.as_ref()?;
++    let clave = (d.doc.id, d.revision, sel.tile_bounds());
++    match &app.jacnex_ia.limites {
++        Some((c, r)) if *c == clave => *r,
++        _ => {
++            let r = Some(sel.content_bounds().intersect(&d.doc.bounds())).filter(|r| !r.is_empty());
++            app.jacnex_ia.limites = Some((clave, r));
++            r
++        }
++    }
++}
++
++/// Devuelve si se pidió Generar.
++fn contenido(app: &mut PhotocraftApp, ui: &mut egui::Ui, more: &mut task_bar::MoreMenu, costo: Option<i64>) -> bool {
++    let mut pedir = false;
++    if let Some(t) = app.jacnex_ia.trabajo.as_ref() {
++        ui.add(egui::Spinner::new());
++        ui.label(format!("{}  {} s", t.etapa, t.inicio.elapsed().as_secs()));
++    } else if !app.jacnex_ia.barra_expandida {
++        if crate::icons::button_with_icon_size_tip(ui, "sparkles", task_bar::BUTTON, 14.0, false, "Relleno generativo", false).clicked()
++            | ui.add(egui::Button::new("Relleno generativo").frame(false)).clicked()
++        {
++            app.jacnex_ia.barra_expandida = true;
++            pedir_info(&mut app.jacnex_ia);
++        }
++    } else {
++        let r = ui.add(
++            egui::TextEdit::singleline(&mut app.jacnex_ia.prompt)
++                .hint_text("Describe qué poner (vacío = quitar)")
++                .desired_width(230.0),
++        );
++        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
++        if boton_generar(ui, costo, true).clicked() || enter {
++            pedir = true;
++        }
++        if ui.small_button("?").on_hover_text("Abrir la ventana de la IA con explicaciones").clicked() {
++            app.jacnex_ia.abierta = true;
++        }
++    }
++    more.show(ui);
++    if let Some((false, m)) = &app.jacnex_ia.aviso
++        && app.jacnex_ia.trabajo.is_none()
++    {
++        ui.colored_label(Color32::from_rgb(230, 120, 90), "(!)").on_hover_text(m.as_str());
++    }
++    pedir
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn cubrir_keeps_the_size_and_fills_without_stretching() {
++        // 4×2 left half red, right half blue → 2×2: the centre crop is one red, one blue column.
++        let mut src = Vec::new();
++        for _ in 0..2 {
++            for x in 0..4 {
++                src.extend_from_slice(if x < 2 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
++            }
++        }
++        let out = cubrir(&src, 4, 2, 2, 2);
++        assert_eq!(out.len(), 16);
++        assert_eq!(&out[0..4], &[255, 0, 0, 255]);
++        assert_eq!(&out[4..8], &[0, 0, 255, 255]);
++    }
++
++    #[test]
++    fn big_areas_are_sent_smaller_keeping_their_shape() {
++        assert_eq!(tamano_envio(800, 600), (800, 600));
++        assert_eq!(tamano_envio(4000, 2000), (1536, 768));
++        assert_eq!(cubrir(&[0; 4 * 4000 * 10], 4000, 10, 400, 1).len(), 1600);
++    }
++
++    #[test]
++    fn layer_names_are_short() {
++        assert_eq!(nombre_capa("  "), "IA · Relleno");
++        assert!(nombre_capa(&"a".repeat(80)).ends_with('…'));
++    }
++
++    #[test]
++    fn the_server_override_is_only_for_this_machine() {
++        assert!(es_local("http://127.0.0.1:3000"));
++        assert!(!es_local("https://app.jacnex.store"));
++        assert!(!es_local("http://127.0.0.1.evil.com"));
++    }
++}
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 99b52aeb2..28087e66c 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -42,6 +42,7 @@ pub mod home_recent_ui;
+ pub mod i18n;
+ mod icon_data;
+ pub mod icons;
++pub mod jacnex_ia;
+ pub mod jobs_ui;
+ pub(crate) mod last_brush;
+ pub mod levels_clipping;
+@@ -775,6 +776,8 @@ pub struct PhotocraftApp {
+     last_frame_start_ms: f64,
+     /// Background job bookkeeping: opening tabs, control replies waiting on a job.
+     pub jobs: jobs_ui::JobsUi,
++    /// Jacnex: la IA integrada (ventana, barra bajo la selección y generación en curso).
++    pub jacnex_ia: jacnex_ia::Estado,
+     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
+     live_tokens: theme::live::LiveTokens,
+ }
+diff --git a/crates/ui-egui/src/menus/invoke.rs b/crates/ui-egui/src/menus/invoke.rs
+index c05bcbfa9..58cc6740f 100644
+--- a/crates/ui-egui/src/menus/invoke.rs
++++ b/crates/ui-egui/src/menus/invoke.rs
+@@ -424,6 +424,10 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
+             app.ui.palette_open = !app.ui.palette_open;
+             Ok(Value::Null)
+         }
++        "jacnex.ia" => {
++            crate::jacnex_ia::alternar(app);
++            Ok(Value::Null)
++        }
+         "help.about" => Ok(json!({"dialog": app.ui.open_dialog(DialogKind::About, Default::default())})),
+         "help.systemInfo" => {
+             let mut fields = serde_json::Map::new();
+diff --git a/crates/ui-egui/src/menus/items.rs b/crates/ui-egui/src/menus/items.rs
+index 4c36419c9..0f9d1c5d7 100644
+--- a/crates/ui-egui/src/menus/items.rs
++++ b/crates/ui-egui/src/menus/items.rs
+@@ -43,6 +43,7 @@ const PLACE_AFTER: &[(&str, &str)] = &[
+     ("filter.render.relight", "filter.render.lightingEffects"),
+     ("view.resetView", "view.flipHorizontal"),
+     ("filter.other.colorToAlpha", "filter.other.offset"),
++    ("jacnex.ia", "edit.contentAwareFill"),
+ ];
+ 
+ pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
+diff --git a/crates/ui-egui/src/menus/state.rs b/crates/ui-egui/src/menus/state.rs
+index e4bdc7a66..84669abaf 100644
+--- a/crates/ui-egui/src/menus/state.rs
++++ b/crates/ui-egui/src/menus/state.rs
+@@ -62,7 +62,7 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
+         | "window.panel.closeOthers"
+         | "window.panel.minimize"
+         | "window.panel.iconic" => !app.session.prefs().workspace_locked,
+-        "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
++        "file.open" | "file.exit" | "file.clearRecent" | "file.removeRecent" | "help.about" | "help.systemInfo" | "edit.search" | "jacnex.ia" => true,
+         i if i.starts_with("file.openRecent.") => true,
+         i if i.starts_with(DOCUMENT_ITEM) => true,
+         i if crate::links::url_for(i).is_some() => true,
+diff --git a/crates/ui-egui/tests/it/jacnex_ia.rs b/crates/ui-egui/tests/it/jacnex_ia.rs
+new file mode 100644
+index 000000000..137697780
+--- /dev/null
++++ b/crates/ui-egui/tests/it/jacnex_ia.rs
+@@ -0,0 +1,200 @@
++//! Jacnex: la IA integrada (`jacnex_ia`). Con una selección, la barra contextual ofrece
++//! «Relleno generativo»; Generar envía la zona y su máscara al servidor, y el resultado vuelve como
++//! una capa nueva recortada por la selección (un solo paso de historial).
++//!
++//! La app entera corre en un arnés de egui_kittest; el servidor es uno falso en 127.0.0.1 que
++//! responde como /v1/jacnex de Forgenex. Con `JACNEX_IA_PRUEBA=<url>|<llave>` la misma prueba va
++//! contra un Forgenex local de verdad (con kie.ai simulado).
++
++use std::io::{BufRead, BufReader, Read, Write};
++use std::net::TcpListener;
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
++
++use egui::vec2;
++use egui_kittest::kittest::Queryable;
++use photocraft_geom::Rect;
++use photocraft_ui_egui::PhotocraftApp;
++use photocraft_ui_egui::control::{ControlRequest, Outcome, handle};
++use serde_json::{Value, json};
++
++type Harness = egui_kittest::Harness<'static, PhotocraftApp>;
++
++const ROJO: [u8; 4] = [220, 30, 40, 255];
++
++fn harness() -> Harness {
++    let mut h = Harness::builder().with_size(vec2(1100.0, 760.0)).with_max_steps(64).build_eframe(|cc| {
++        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
++        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
++        app.session.prefs.edit(|p| p.interface.language = "en".into());
++        app.run("file.new", json!({"width": 400, "height": 300, "background": "white"})).expect("new");
++        app
++    });
++    h.run_steps(4);
++    control(&mut h, "ui.set", json!({"tool": "rectMarquee", "zoom": 1.0, "center": [200, 150]}));
++    h
++}
++
++fn control(h: &mut Harness, method: &str, params: Value) -> Value {
++    let ctx = h.ctx.clone();
++    let (req, _rx) = ControlRequest::new(method, params.clone());
++    let Outcome::Done(v) = handle(h.state_mut(), &ctx, &req) else { panic!("{method} {params}: not done") };
++    assert_eq!(v["ok"], true, "{method} {params}: {v}");
++    h.run_steps(4);
++    v
++}
++
++/// Lo que el servidor falso recibió.
++#[derive(Default)]
++struct Recibido {
++    generar: Vec<String>,
++}
++
++fn png_rojo() -> Vec<u8> {
++    let img = photocraft_codecs::Image::from_u8(64, 48, photocraft_codecs::ChannelLayout::Rgba, ROJO.repeat(64 * 48)).unwrap();
++    photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &photocraft_codecs::EncodeOptions::default()).unwrap()
++}
++
++/// Un /v1/jacnex falso: estado, generar, trabajo (listo a la segunda consulta) y el PNG.
++fn servidor_falso() -> (String, Arc<Mutex<Recibido>>) {
++    let l = TcpListener::bind("127.0.0.1:0").unwrap();
++    let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
++    let recibido = Arc::new(Mutex::new(Recibido::default()));
++    let (r2, base2) = (recibido.clone(), base.clone());
++    std::thread::spawn(move || {
++        let mut consultas = 0;
++        for s in l.incoming() {
++            let Ok(mut s) = s else { continue };
++            let mut lector = BufReader::new(s.try_clone().unwrap());
++            let mut linea = String::new();
++            lector.read_line(&mut linea).unwrap();
++            let (mut largo, mut auth) = (0usize, String::new());
++            loop {
++                let mut h = String::new();
++                lector.read_line(&mut h).unwrap();
++                let h = h.trim_end();
++                if h.is_empty() {
++                    break;
++                }
++                let (k, v) = h.split_once(':').unwrap_or((h, ""));
++                match k.to_ascii_lowercase().as_str() {
++                    "content-length" => largo = v.trim().parse().unwrap(),
++                    "authorization" => auth = v.trim().to_string(),
++                    _ => {}
++                }
++            }
++            let mut cuerpo = vec![0; largo];
++            lector.read_exact(&mut cuerpo).unwrap();
++            let ruta = linea.split_whitespace().nth(1).unwrap_or("").to_string();
++            let (estado, tipo, datos): (u16, &str, Vec<u8>) = if ruta == "/r.png" {
++                (200, "image/png", png_rojo())
++            } else if auth != "Bearer jk_prueba" {
++                (401, "application/json", br#"{"error":{"message":"Llave no valida"}}"#.to_vec())
++            } else if ruta.starts_with("/v1/jacnex/estado") {
++                (200, "application/json", br#"{"nombre":"Prueba","creditos":100,"modelo":{"id":"nano-banana","costo":8,"costoEdicion":9}}"#.to_vec())
++            } else if ruta == "/v1/jacnex/generar" {
++                r2.lock().unwrap().generar.push(String::from_utf8_lossy(&cuerpo).into_owned());
++                (201, "application/json", br#"{"id":"t1","creditos":9,"saldo":91}"#.to_vec())
++            } else if ruta == "/v1/jacnex/trabajo/t1" {
++                consultas += 1;
++                let v = if consultas < 2 { json!({"id":"t1","estado":"procesando","resultados":[]}) } else { json!({"id":"t1","estado":"listo","resultados":[format!("{base2}/r.png")]}) };
++                (200, "application/json", v.to_string().into_bytes())
++            } else {
++                (404, "application/json", br#"{"error":{"message":"no"}}"#.to_vec())
++            };
++            let _ = write!(s, "HTTP/1.1 {estado} X\r\nContent-Type: {tipo}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", datos.len());
++            let _ = s.write_all(&datos);
++        }
++    });
++    (base, recibido)
++}
++
++fn pixel(app: &PhotocraftApp, x: i32, y: i32) -> [u8; 4] {
++    let d = app.session.active().unwrap();
++    photocraft_engine::jacnex_ia::composite_rgba8(&d.doc, Rect::new(x, y, x + 1, y + 1))[0]
++}
++
++#[test]
++fn generative_fill_from_the_selection_bar_lands_as_a_masked_layer() {
++    let (servidor, llave, recibido) = match std::env::var("JACNEX_IA_PRUEBA").ok().and_then(|v| v.split_once('|').map(|(a, b)| (a.to_string(), b.to_string()))) {
++        Some((s, l)) => (s, l, None),
++        None => {
++            let (s, r) = servidor_falso();
++            (s, "jk_prueba".to_string(), Some(r))
++        }
++    };
++    let mut h = harness();
++    assert!(photocraft_ui_egui::jacnex_ia::usar_servidor_local(h.state_mut(), &servidor, &llave));
++    assert!(!photocraft_ui_egui::jacnex_ia::usar_servidor_local(h.state_mut(), "https://example.com", &llave), "solo esta máquina");
++    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 120, "height": 80, "antiAlias": false})).unwrap();
++    h.run_steps(4);
++    let capas = h.state().session.active().unwrap().doc.layers.len();
++
++    // La barra bajo la selección: primero el botón, luego el campo y Generar.
++    h.get_all_by_label("Relleno generativo").next().expect("la barra ofrece Relleno generativo").click();
++    h.run_steps(4);
++    h.state_mut().jacnex_ia.prompt = "flores rojas".into();
++    let inicio = Instant::now();
++    // El costo llega del servidor: «Generar · 9 créditos».
++    while h.query_all_by_label_contains("9 créditos").next().is_none() {
++        assert!(inicio.elapsed() < Duration::from_secs(10) || recibido.is_none(), "no llegó el costo");
++        if inicio.elapsed() > Duration::from_secs(10) {
++            break;
++        }
++        h.run_steps(2);
++        std::thread::sleep(Duration::from_millis(50));
++    }
++    h.get_all_by_label_contains("Generar").next().unwrap().click();
++    let inicio = Instant::now();
++    while h.state().session.active().unwrap().doc.layers.len() == capas {
++        assert!(inicio.elapsed() < Duration::from_secs(60), "el resultado no llegó");
++        h.run_steps(2);
++        std::thread::sleep(Duration::from_millis(100));
++    }
++    h.run_steps(4);
++
++    let app = h.state();
++    let d = app.session.active().unwrap();
++    assert_eq!(d.doc.layers.len(), capas + 1);
++    let capa = d.doc.layer(d.active_layer.unwrap()).unwrap();
++    assert!(capa.name.starts_with("IA · flores rojas"), "{}", capa.name);
++    assert!(capa.mask.is_some(), "recortada por la selección");
++    assert!(d.doc.selection.is_some(), "la selección sigue");
++    if recibido.is_some() {
++        assert_eq!(pixel(app, 160, 140), ROJO, "dentro de la selección: el resultado");
++    } else {
++        assert_ne!(pixel(app, 160, 140), [255, 255, 255, 255], "dentro de la selección: el resultado");
++    }
++    assert_eq!(pixel(app, 90, 90), [255, 255, 255, 255], "fuera: la imagen de antes");
++    if let Some(r) = recibido {
++        let r = r.lock().unwrap();
++        assert_eq!(r.generar.len(), 1);
++        let cuerpo = &r.generar[0];
++        assert!(cuerpo.contains("name=\"model\"\r\n\r\nnano-banana\r\n"));
++        assert!(cuerpo.contains("flores rojas"));
++        assert_eq!(cuerpo.matches("name=\"image\"").count(), 2, "la zona y su máscara");
++        // 120×80 más un 15 % a cada lado: 156×104 (dentro del lienzo).
++        assert!(cuerpo.contains("name=\"size\"\r\n\r\n156x104\r\n"), "{}", &cuerpo[..cuerpo.len().min(600)]);
++    }
++
++    // Un solo Ctrl+Z quita el resultado.
++    h.state_mut().run("edit.undo", json!({})).unwrap();
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas);
++}
++
++#[test]
++fn the_menu_opens_the_guided_window() {
++    let mut h = harness();
++    // Un servidor que no responde: la prueba no lee la sesión real de Jacnex Studio.
++    assert!(photocraft_ui_egui::jacnex_ia::usar_servidor_local(h.state_mut(), "http://127.0.0.1:9", "jk_x"));
++    let item = photocraft_ui_egui::menus::menu_items(h.state()).into_iter().find(|i| i.id == "jacnex.ia").expect("en el menú");
++    assert_eq!(item.path, vec!["Edit".to_string()]);
++    assert!(item.enabled);
++    let ctx = h.ctx.clone();
++    photocraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "jacnex.ia", Value::Null).unwrap();
++    h.run_steps(6);
++    assert!(h.state().jacnex_ia.abierta);
++    h.get_by_label_contains("IA de Jacnex");
++    h.get_by_label_contains("Google Nano Banana");
++    h.get_by_label_contains("1 · Dónde");
++}
+diff --git a/crates/ui-egui/tests/it/main.rs b/crates/ui-egui/tests/it/main.rs
+index 8004bf5b7..b7ac7e199 100644
+--- a/crates/ui-egui/tests/it/main.rs
++++ b/crates/ui-egui/tests/it/main.rs
+@@ -41,6 +41,7 @@ mod healing_reset_tip;
+ #[path = "../../examples/interactive_bench.rs"]
+ #[allow(dead_code)]
+ mod interactive_bench_reporting;
++mod jacnex_ia;
+ mod layout_perf;
+ mod live_stroke_canvas;
+ mod magnetic_lasso_right_click;

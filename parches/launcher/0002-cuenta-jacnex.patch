@@ -675,7 +675,7 @@ index cacef51..138458c 100644
  pub mod manifest;
  #[cfg(any(windows, test))]
 diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
-index 3fddd45..e89bfde 100644
+index 3fddd45..691ce8b 100644
 --- a/crates/ui-egui/src/app.rs
 +++ b/crates/ui-egui/src/app.rs
 @@ -68,6 +68,11 @@ pub trait Host {
@@ -755,16 +755,7 @@ index 3fddd45..e89bfde 100644
          // Messages made here (toasts, alerts) are drawn later, so use the language the UI can
          // actually show: English where the system has no CJK face for the preference.
          set_current(effective_lang(&self.settings.language));
-@@ -547,6 +577,8 @@ impl LauncherUi {
-             if self.settings.auto_update {
-                 self.trigger_auto_updates();
-             }
-+            // Jacnex: Jacnex Studio se pone al día solo siempre, aunque las apps no (obligatorio).
-+            self.update_launcher_itself();
-         }
-         if self.restart_requested {
-             // The helper is waiting for this process to exit before it starts the new launcher.
-@@ -767,7 +799,7 @@ impl LauncherUi {
+@@ -767,7 +797,7 @@ impl LauncherUi {
          let to_update: Vec<(String, String)> = self
              .entries
              .iter()
@@ -773,20 +764,20 @@ index 3fddd45..e89bfde 100644
              .filter_map(|e| {
                  let v = e.latest_label()?;
                  if self.auto_update_attempted.contains(&(e.app.id.to_string(), v.clone())) { None } else { Some((e.app.id.to_string(), v)) }
-@@ -786,6 +818,12 @@ impl LauncherUi {
+@@ -786,6 +816,12 @@ impl LauncherUi {
                  self.send(Command::Install { app: id });
              }
          }
 +        self.update_launcher_itself();
 +    }
 +
-+    /// Queues the launcher's own update, once per version and session, whatever the auto-update
-+    /// setting says (Jacnex: Jacnex Studio is always kept up to date).
++    /// Queues the launcher's own update, once per version and session (with auto-update on, as
++    /// the person chooses; from 0.19.6 it is no longer forced).
 +    pub(crate) fn update_launcher_itself(&mut self) {
          if self.caps.self_update
              && let Some(r) = &self.launcher_update
              && self.launcher_job.is_none()
-@@ -825,6 +863,7 @@ impl LauncherUi {
+@@ -825,6 +861,7 @@ impl LauncherUi {
  
      /// Draws the launcher.
      pub fn ui(&mut self, ui: &mut egui::Ui, host: &mut dyn Host) {
@@ -794,7 +785,7 @@ index 3fddd45..e89bfde 100644
          let ctx = ui.ctx().clone();
          self.begin_ui_frame(&ctx);
          if host.title_bar() == TitleBar::MacOs && ctx.input_mut(|i| i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::M)) {
-@@ -1170,6 +1209,24 @@ mod tests {
+@@ -1170,6 +1207,24 @@ mod tests {
          assert_eq!(drawable_lang("fr", Some(Lang::ZH_CN)), Lang::FR);
      }
  
@@ -1575,26 +1566,3 @@ index 0000000..d4a3b83
 +    h.step();
 +    assert!(!pedidos(&h).contains(&egui::ViewportCommand::Minimized(false)));
 +}
-diff --git a/crates/ui-egui/tests/ui.rs b/crates/ui-egui/tests/ui.rs
-index 480aa75..3aa3739 100644
---- a/crates/ui-egui/tests/ui.rs
-+++ b/crates/ui-egui/tests/ui.rs
-@@ -2979,7 +2979,7 @@ fn a_freebsd_system_binary_is_not_offered_an_update_it_would_refuse() {
- 
- #[test]
- /// With auto-update off, no app install or launcher update is queued.
--fn automatic_updates_are_disabled_by_default() {
-+fn automatic_updates_are_disabled_by_default_but_not_for_the_launcher() {
-     let mut ev = events();
-     ev.push(Event::LauncherUpdate(release("jacnex-studio", "0.2.0", NOW)));
-     let sent = Rc::new(RefCell::new(Vec::new()));
-@@ -3010,7 +3010,8 @@ fn automatic_updates_are_disabled_by_default() {
-     h.run_steps(4);
-     let commands = sent.borrow().clone();
-     assert!(!commands.contains(&Command::Install { app: "photocraft".into() }), "photocraft should not be auto-installed when auto_update is false");
--    assert!(!commands.contains(&Command::UpdateLauncher), "launcher should not be auto-updated when auto_update is false");
-+    // Jacnex: Jacnex Studio itself always updates, whatever auto_update says.
-+    assert!(commands.contains(&Command::UpdateLauncher), "the launcher updates itself even when auto_update is false");
- }
- 
- #[test]
