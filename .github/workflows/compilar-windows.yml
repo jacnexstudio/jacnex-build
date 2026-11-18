@@ -23,6 +23,10 @@ on:
         description: "Versión original a compilar (etiqueta). Vacío: la última publicada."
         type: string
         default: ""
+      version:
+        description: "Versión de Jacnex (X.Y.Z) si no es la de ArtCraft. Vacío: la misma que ref."
+        type: string
+        default: ""
       publicar:
         description: "Publicar la versión en este repositorio"
         type: boolean
@@ -37,6 +41,13 @@ jobs:
     timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
+      # Compilación rápida: ArtCraft compila con `codegen-units = 1` y LTO "thin", que en el
+      # runner de 4 núcleos hacen que Photonex o Vectornex tarden 17-30 min aunque la caché
+      # acierte. Con 16 unidades y sin LTO entre crates tarda varias veces menos; el programa
+      # queda algo más grande y unos puntos más lento. Van a nivel de job (no del paso) para que
+      # entren en la clave de rust-cache y la caché guarde las dependencias ya compiladas así.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_LTO: "false"
     steps:
       - name: Elegir la versión original
         id: version
@@ -45,8 +56,15 @@ jobs:
           $ref = '${{ inputs.ref }}'
           if (-not $ref) { $ref = gh release view --repo '${{ inputs.upstream }}' --json tagName --jq .tagName }
           if (-not $ref) { throw 'No se encontró ninguna versión publicada en ${{ inputs.upstream }}' }
+          # La versión que publica Jacnex: la de ArtCraft, o una mayor si se vuelve a compilar con
+          # cambios de Jacnex (la calcula actualizar.yml).
+          $version = '${{ inputs.version }}'
+          if (-not $version) { $version = $ref.TrimStart('v') }
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "Versión de Jacnex no válida: $version" }
           "ref=$ref" >> $env:GITHUB_OUTPUT
-          Write-Output "Compilando ${{ inputs.upstream }} $ref"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          Write-Output "Compilando ${{ inputs.upstream }} $ref como Jacnex v$version"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,6 +91,21 @@ jobs:
       # Después de la caché: cambia la copia descargada de craft-update (actualizarse sin firma).
       - name: Ajustar bibliotecas de ArtCraft
         run: python -B jb/rebrand/bibliotecas.py src
+
+      # Después de la caché, como el paso anterior: el número de versión no cambia su clave.
+      - name: Versión de Jacnex
+        if: steps.version.outputs.tag != steps.version.outputs.ref
+        shell: pwsh
+        working-directory: src
+        run: |
+          python -B ../jb/rebrand/version.py . '${{ steps.version.outputs.version }}'
+          if ($LASTEXITCODE -ne 0) { throw 'No se pudo poner la versión' }
+          # Solo las entradas de las crates del propio código en Cargo.lock (la compilación usa --locked).
+          cargo update --workspace --offline
+          if ($LASTEXITCODE -ne 0) {
+            cargo update --workspace
+            if ($LASTEXITCODE -ne 0) { throw 'cargo update --workspace falló' }
+          }
 
       - name: Instalar WiX (instalador MSI)
         run: |
@@ -118,7 +151,7 @@ jobs:
             choco install innosetup -y --no-progress
             if ($LASTEXITCODE -ne 0) { throw 'No se pudo instalar Inno Setup' }
           }
-          $version = '${{ steps.version.outputs.ref }}'.TrimStart('v')
+          $version = '${{ steps.version.outputs.version }}'
           $msi = Get-ChildItem dist -Filter *.msi | Select-Object -First 1
           if (-not $msi) { throw 'No hay MSI en dist' }
           & $iscc /Q "/DVersion=$version" "/DMsi=$($msi.FullName)" "/O$env:GITHUB_WORKSPACE\dist" jb\instalador\jacnex-studio.iss
@@ -137,16 +170,18 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.proyecto }}-${{ steps.version.outputs.ref }}-windows-x64
+          name: ${{ inputs.proyecto }}-${{ steps.version.outputs.tag }}-windows-x64
           path: dist/*
 
       - name: Publicar versión
         if: inputs.publicar
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.ref }}'
+          $tag = '${{ steps.version.outputs.tag }}'
+          $ref = '${{ steps.version.outputs.ref }}'
           $repo = '${{ github.repository }}'
-          $notas = "${{ inputs.nombre }} $tag, compilado desde ${{ inputs.upstream }} $tag con la marca Jacnex. Código y cambios: https://github.com/jacnexstudio/jacnex-build"
+          # actualizar.yml lee "compilado desde <upstream> <ref>" para saber de qué versión de ArtCraft salió.
+          $notas = "${{ inputs.nombre }} $tag, compilado desde ${{ inputs.upstream }} $ref con la marca Jacnex. Código y cambios: https://github.com/jacnexstudio/jacnex-build"
           gh release view $tag --repo $repo *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag (Get-ChildItem dist -File).FullName --repo $repo --clobber

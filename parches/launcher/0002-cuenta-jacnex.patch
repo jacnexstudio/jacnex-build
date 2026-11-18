@@ -1,0 +1,1322 @@
+diff --git a/apps/jacnex-studio/src/main.rs b/apps/jacnex-studio/src/main.rs
+index 9a6de40..02f45b6 100644
+--- a/apps/jacnex-studio/src/main.rs
++++ b/apps/jacnex-studio/src/main.rs
+@@ -663,9 +663,15 @@ struct DesktopHost {
+     /// Settings asks once per app's package, and the macOS answer probes the disk. There are
+     /// only a handful of distinct questions (format and architecture).
+     default_folders: Vec<DefaultFolderAnswer>,
++    /// La cuenta Jacnex (agregado por Jacnex).
++    cuenta: Option<jacnex_studio_native::jacnex_cuenta::ServicioCuenta>,
+ }
+ 
+ impl Host for DesktopHost {
++    fn cuenta(&mut self) -> Option<&mut dyn jacnex_studio_core::cuenta::Cuenta> {
++        self.cuenta.as_mut().map(|c| c as &mut dyn jacnex_studio_core::cuenta::Cuenta)
++    }
++
+     fn title_bar(&self) -> TitleBar {
+         if cfg!(target_os = "macos") { TitleBar::MacOs } else { TitleBar::Custom }
+     }
+@@ -772,7 +778,17 @@ impl Launcher {
+             system_theme: system_theme::Monitor::default(),
+             ui: LauncherUi::new(&windowless, backend, Settings::default()),
+             tray: None,
+-            host: DesktopHost { tray: false, quit: false, default_folders: Vec::new() },
++            host: DesktopHost {
++                tray: false,
++                quit: false,
++                default_folders: Vec::new(),
++                // Las pruebas no tocan la sesión guardada de quien las corre.
++                cuenta: if cfg!(test) {
++                    None
++                } else {
++                    jacnex_studio_native::paths::Paths::new().ok().map(|p| jacnex_studio_native::jacnex_cuenta::ServicioCuenta::nuevo(&p))
++                },
++            },
+             starts,
+             windowless,
+             run_again,
+diff --git a/crates/core/src/cuenta.rs b/crates/core/src/cuenta.rs
+new file mode 100644
+index 0000000..44cfd6b
+--- /dev/null
++++ b/crates/core/src/cuenta.rs
+@@ -0,0 +1,121 @@
++//! La cuenta Jacnex del launcher (agregado por Jacnex): la misma cuenta, créditos y plan de
++//! Forgenex (app.jacnex.store). Aquí solo hay datos y lógica; el escritorio hace las llamadas a la
++//! red y guarda la sesión, y la interfaz pide iniciar sesión antes de mostrar el launcher.
++
++use serde::{Deserialize, Serialize};
++
++/// Donde vive la cuenta.
++pub const SERVIDOR: &str = "https://app.jacnex.store";
++
++/// Lo que el launcher muestra de la persona.
++#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++pub struct Usuario {
++    pub nombre: String,
++    pub correo: String,
++    pub creditos: i64,
++    /// El nombre del plan pagado (`Creador`), si tiene uno.
++    pub plan: Option<String>,
++}
++
++impl Usuario {
++    /// Lee la respuesta de `/api/launcher/yo` (o el campo `usuario` de entrar y canjear).
++    pub fn desde_json(v: &serde_json::Value) -> Option<Self> {
++        let correo = v.get("correo")?.as_str()?.trim().to_string();
++        if correo.is_empty() {
++            return None;
++        }
++        let nombre = v.get("nombre").and_then(|n| n.as_str()).map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&correo).to_string();
++        let creditos = v.get("creditos").and_then(serde_json::Value::as_i64).unwrap_or(0);
++        let plan = v.get("plan").and_then(|p| p.get("nombre")).and_then(|n| n.as_str()).map(str::to_string);
++        Some(Self { nombre, correo, creditos, plan })
++    }
++
++    /// La inicial para el círculo de la cabecera.
++    pub fn inicial(&self) -> String {
++        self.nombre.chars().find(|c| c.is_alphanumeric()).map_or_else(|| "?".to_string(), |c| c.to_uppercase().collect())
++    }
++}
++
++/// `1500` → `1,500`, como en la web (es-PE).
++pub fn miles(n: i64) -> String {
++    let digitos = n.unsigned_abs().to_string();
++    let mut fuera = String::new();
++    for (i, c) in digitos.chars().enumerate() {
++        if i > 0 && (digitos.len() - i).is_multiple_of(3) {
++            fuera.push(',');
++        }
++        fuera.push(c);
++    }
++    if n < 0 { format!("-{fuera}") } else { fuera }
++}
++
++/// En qué punto está la sesión.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum EstadoCuenta {
++    /// Hay que iniciar sesión; `error` explica por qué falló el último intento.
++    SinSesion {
++        error: Option<String>,
++    },
++    /// Se mandó el correo y la contraseña; esperando la respuesta.
++    Entrando,
++    /// Se abrió el navegador: la persona inicia sesión allí y aprueba `codigo`.
++    EsperandoNavegador {
++        url: String,
++        codigo: String,
++    },
++    Conectada(Usuario),
++}
++
++/// Lo que la interfaz le pide a la cuenta.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum OrdenCuenta {
++    Entrar {
++        correo: String,
++        clave: String,
++    },
++    /// Entrar (o crear la cuenta, `registro`) en la web y volver conectado.
++    ConNavegador {
++        registro: bool,
++    },
++    /// Dejar de esperar al navegador.
++    Cancelar,
++    /// Volver a leer los créditos y el plan.
++    Actualizar,
++    Salir,
++}
++
++/// La cuenta, vista desde la interfaz. Nunca bloquea: las respuestas llegan en `estado`.
++pub trait Cuenta {
++    /// El estado de ahora (lee lo que haya llegado desde la última vez).
++    fn estado(&mut self) -> EstadoCuenta;
++    fn enviar(&mut self, orden: OrdenCuenta);
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn lee_la_cuenta_de_forgenex() {
++        let v = serde_json::json!({"nombre": "Ana", "correo": "ana@x.pe", "creditos": 3200, "plan": {"id": "creador", "nombre": "Creador"}});
++        assert_eq!(
++            Usuario::desde_json(&v),
++            Some(Usuario { nombre: "Ana".into(), correo: "ana@x.pe".into(), creditos: 3200, plan: Some("Creador".into()) })
++        );
++        let sin_plan = serde_json::json!({"nombre": " ", "correo": "lu@x.pe", "creditos": 30, "plan": null});
++        let u = Usuario::desde_json(&sin_plan);
++        assert_eq!(u.as_ref().map(|u| (u.nombre.as_str(), u.plan.is_none())), Some(("lu@x.pe", true)));
++        assert_eq!(Usuario::desde_json(&serde_json::json!({"error": "x"})), None);
++    }
++
++    #[test]
++    fn numeros_e_iniciales() {
++        assert_eq!(miles(0), "0");
++        assert_eq!(miles(950), "950");
++        assert_eq!(miles(1500), "1,500");
++        assert_eq!(miles(17000), "17,000");
++        assert_eq!(miles(1234567), "1,234,567");
++        let u = Usuario { nombre: "ébano".into(), ..Usuario::default() };
++        assert_eq!(u.inicial(), "É");
++    }
++}
+diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs
+index c0b6985..bf85f0d 100644
+--- a/crates/core/src/lib.rs
++++ b/crates/core/src/lib.rs
+@@ -8,6 +8,7 @@
+ 
+ pub mod args;
+ pub mod catalog;
++pub mod cuenta;
+ pub mod details;
+ pub mod distro;
+ pub mod feed;
+diff --git a/crates/native/src/jacnex_cuenta.rs b/crates/native/src/jacnex_cuenta.rs
+new file mode 100644
+index 0000000..3dc3123
+--- /dev/null
++++ b/crates/native/src/jacnex_cuenta.rs
+@@ -0,0 +1,472 @@
++//! La cuenta Jacnex en el escritorio (agregado por Jacnex): iniciar sesión en app.jacnex.store con
++//! correo y contraseña o por el navegador, guardar la sesión en el equipo y leer los créditos.
++//!
++//! La sesión es una llave de API de Forgenex con el nombre del equipo ("Jacnex Studio · PC"),
++//! guardada en `<datos del launcher>/cuenta.json`. Cerrar sesión la borra aquí y en el servidor;
++//! también se puede borrar desde la web (Conectar apps). Las llamadas a la red van en hilos: la
++//! interfaz nunca espera.
++
++use std::io::Read;
++use std::path::PathBuf;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::mpsc::{Receiver, Sender, channel};
++use std::time::{Duration, Instant};
++
++use jacnex_studio_core::cuenta::{Cuenta, EstadoCuenta, OrdenCuenta, SERVIDOR, Usuario};
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++
++use crate::paths::Paths;
++
++const USER_AGENT: &str = concat!("Jacnex-Launcher/", env!("CARGO_PKG_VERSION"));
++const MAX_RESPUESTA: u64 = 64 * 1024;
++const SIN_RED: &str = "No se pudo conectar con Jacnex. Revisa tu conexión a internet e inténtalo de nuevo.";
++const SESION_CERRADA: &str = "Tu sesión se cerró. Vuelve a iniciar sesión.";
++
++/// Lo que se guarda en el equipo.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++struct Sesion {
++    llave: String,
++    usuario: Usuario,
++}
++
++/// Lo que los hilos le cuentan a la cuenta.
++enum Resultado {
++    Conectada(Sesion),
++    Fallo(String),
++    Esperando { url: String, codigo: String },
++    Refrescada(Usuario),
++    Cerrada,
++}
++
++/// La cuenta del escritorio.
++pub struct ServicioCuenta {
++    estado: EstadoCuenta,
++    sesion: Option<Sesion>,
++    archivo: PathBuf,
++    base: String,
++    agente: ureq::Agent,
++    /// Sube con cada acción de la persona: lo que llega de una acción anterior se descarta y la
++    /// espera del navegador se detiene.
++    turno: Arc<AtomicU64>,
++    tx: Sender<(u64, Resultado)>,
++    rx: Receiver<(u64, Resultado)>,
++}
++
++impl ServicioCuenta {
++    pub fn nuevo(paths: &Paths) -> Self {
++        let archivo = paths.data.join("cuenta.json");
++        let sesion = leer_sesion(&archivo);
++        let (tx, rx) = channel();
++        let mut cuenta = Self {
++            estado: sesion.as_ref().map_or(EstadoCuenta::SinSesion { error: None }, |s| EstadoCuenta::Conectada(s.usuario.clone())),
++            sesion,
++            archivo,
++            base: base(),
++            agente: agente(),
++            turno: Arc::new(AtomicU64::new(0)),
++            tx,
++            rx,
++        };
++        // Con una sesión guardada se entra de una vez (también sin internet) y se revisa en segundo plano.
++        if cuenta.sesion.is_some() {
++            cuenta.enviar(OrdenCuenta::Actualizar);
++        }
++        cuenta
++    }
++
++    fn nuevo_turno(&self) -> u64 {
++        self.turno.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
++    }
++
++    fn en_hilo(&mut self, trabajo: impl FnOnce(&Contexto) -> Option<Resultado> + Send + 'static) {
++        let turno = self.turno.load(Ordering::SeqCst);
++        let contexto = Contexto { base: self.base.clone(), agente: self.agente.clone(), turno, actual: Arc::clone(&self.turno) };
++        let tx = self.tx.clone();
++        let lanzado = std::thread::Builder::new().name("jacnex-cuenta".into()).spawn(move || {
++            if let Some(resultado) = trabajo(&contexto) {
++                let _ = tx.send((turno, resultado));
++            }
++        });
++        if let Err(e) = lanzado {
++            log::warn!("couldn't start the account thread ({e})");
++            if !matches!(self.estado, EstadoCuenta::Conectada(_)) {
++                self.estado = EstadoCuenta::SinSesion { error: Some(SIN_RED.into()) };
++            }
++        }
++    }
++
++    fn guardar(&mut self, sesion: Sesion) {
++        match serde_json::to_vec_pretty(&sesion) {
++            Ok(bytes) => {
++                if let Err(e) = crate::paths::write_atomic(&self.archivo, &bytes) {
++                    log::warn!("couldn't save the Jacnex session ({e})");
++                }
++            }
++            Err(e) => log::warn!("couldn't save the Jacnex session ({e})"),
++        }
++        self.estado = EstadoCuenta::Conectada(sesion.usuario.clone());
++        self.sesion = Some(sesion);
++    }
++
++    fn olvidar(&mut self, error: Option<String>) {
++        self.sesion = None;
++        if self.archivo.exists()
++            && let Err(e) = std::fs::remove_file(&self.archivo)
++        {
++            log::warn!("couldn't delete the Jacnex session ({e})");
++        }
++        self.estado = EstadoCuenta::SinSesion { error };
++    }
++
++    fn recibir(&mut self) {
++        while let Ok((turno, resultado)) = self.rx.try_recv() {
++            if turno != self.turno.load(Ordering::SeqCst) {
++                continue;
++            }
++            match resultado {
++                Resultado::Conectada(sesion) => self.guardar(sesion),
++                Resultado::Fallo(error) => self.estado = EstadoCuenta::SinSesion { error: Some(error) },
++                Resultado::Esperando { url, codigo } => self.estado = EstadoCuenta::EsperandoNavegador { url, codigo },
++                Resultado::Refrescada(usuario) => {
++                    if let Some(sesion) = self.sesion.clone() {
++                        self.guardar(Sesion { llave: sesion.llave, usuario });
++                    }
++                }
++                Resultado::Cerrada => {
++                    if self.sesion.is_some() {
++                        self.olvidar(Some(SESION_CERRADA.into()));
++                    }
++                }
++            }
++        }
++    }
++}
++
++impl Cuenta for ServicioCuenta {
++    fn estado(&mut self) -> EstadoCuenta {
++        self.recibir();
++        self.estado.clone()
++    }
++
++    fn enviar(&mut self, orden: OrdenCuenta) {
++        self.recibir();
++        match orden {
++            OrdenCuenta::Entrar { correo, clave } => {
++                let correo = correo.trim().to_string();
++                if correo.is_empty() || clave.is_empty() {
++                    self.estado = EstadoCuenta::SinSesion { error: Some("Escribe tu correo y tu contraseña.".into()) };
++                    return;
++                }
++                self.nuevo_turno();
++                self.estado = EstadoCuenta::Entrando;
++                self.en_hilo(move |c| Some(entrar(c, &correo, &clave)));
++            }
++            OrdenCuenta::ConNavegador { registro } => {
++                self.nuevo_turno();
++                self.estado = EstadoCuenta::Entrando;
++                let tx = self.tx.clone();
++                self.en_hilo(move |c| Some(con_navegador(c, registro, &tx)));
++            }
++            OrdenCuenta::Cancelar => {
++                self.nuevo_turno();
++                if !matches!(self.estado, EstadoCuenta::Conectada(_)) {
++                    self.estado = EstadoCuenta::SinSesion { error: None };
++                }
++            }
++            OrdenCuenta::Actualizar => {
++                let Some(llave) = self.sesion.as_ref().map(|s| s.llave.clone()) else { return };
++                self.en_hilo(move |c| refrescar(c, &llave));
++            }
++            OrdenCuenta::Salir => {
++                self.nuevo_turno();
++                if let Some(llave) = self.sesion.as_ref().map(|s| s.llave.clone()) {
++                    // Sin esperar: la llave se olvida aquí aunque el servidor no conteste.
++                    self.en_hilo(move |c| {
++                        let _ = pedir(c, "/api/launcher/salir", Some(&llave), Some(json!({})));
++                        None
++                    });
++                }
++                self.olvidar(None);
++            }
++        }
++    }
++}
++
++/// Lo que un hilo necesita.
++struct Contexto {
++    base: String,
++    agente: ureq::Agent,
++    turno: u64,
++    actual: Arc<AtomicU64>,
++}
++
++impl Contexto {
++    fn vigente(&self) -> bool {
++        self.actual.load(Ordering::SeqCst) == self.turno
++    }
++}
++
++fn base() -> String {
++    // Solo en compilaciones de desarrollo, y solo hacia este mismo equipo: una versión publicada
++    // nunca manda la contraseña a otro servidor por una variable de entorno.
++    #[cfg(debug_assertions)]
++    if let Ok(url) = std::env::var("JACNEX_CUENTA_URL")
++        && crate::http::is_loopback(&url)
++    {
++        return url.trim_end_matches('/').to_string();
++    }
++    SERVIDOR.to_string()
++}
++
++fn agente() -> ureq::Agent {
++    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
++    ureq::Agent::config_builder()
++        .tls_config(tls)
++        .proxy(crate::proxy::pick())
++        .timeout_connect(Some(Duration::from_secs(10)))
++        .timeout_global(Some(Duration::from_secs(20)))
++        .http_status_as_error(false)
++        .user_agent(USER_AGENT)
++        .build()
++        .new_agent()
++}
++
++fn leer_sesion(archivo: &std::path::Path) -> Option<Sesion> {
++    let texto = std::fs::read_to_string(archivo).ok()?;
++    let sesion: Sesion = serde_json::from_str(&texto).ok()?;
++    (sesion.llave.starts_with("jk_") && !sesion.usuario.correo.is_empty()).then_some(sesion)
++}
++
++/// El nombre del equipo, para que la persona reconozca la sesión en la web.
++fn equipo() -> String {
++    ["COMPUTERNAME", "HOSTNAME"]
++        .iter()
++        .find_map(|v| std::env::var(v).ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()))
++        .unwrap_or_else(|| "PC".into())
++}
++
++/// Una llamada al servidor: `(estado HTTP, cuerpo JSON)`. POST cuando hay `cuerpo`.
++fn pedir(c: &Contexto, ruta: &str, llave: Option<&str>, cuerpo: Option<Value>) -> Result<(u16, Value), String> {
++    let url = format!("{}{ruta}", c.base);
++    let autorizacion = llave.map(|l| format!("Bearer {l}"));
++    let respuesta = match cuerpo {
++        Some(cuerpo) => {
++            let mut pedido = c.agente.post(&url).header("Content-Type", "application/json").header("Accept", "application/json");
++            if let Some(a) = &autorizacion {
++                pedido = pedido.header("Authorization", a);
++            }
++            pedido.send(cuerpo.to_string())
++        }
++        None => {
++            let mut pedido = c.agente.get(&url).header("Accept", "application/json");
++            if let Some(a) = &autorizacion {
++                pedido = pedido.header("Authorization", a);
++            }
++            pedido.call()
++        }
++    };
++    let mut respuesta = respuesta.map_err(|e| {
++        log::warn!("Jacnex account request failed ({e})");
++        SIN_RED.to_string()
++    })?;
++    let estado = respuesta.status().as_u16();
++    let mut texto = String::new();
++    respuesta.body_mut().with_config().reader().take(MAX_RESPUESTA).read_to_string(&mut texto).map_err(|_| SIN_RED.to_string())?;
++    Ok((estado, serde_json::from_str(&texto).unwrap_or(Value::Null)))
++}
++
++/// El mensaje de error del servidor, o uno general.
++fn error_de(estado: u16, cuerpo: &Value) -> String {
++    cuerpo
++        .get("error")
++        .and_then(Value::as_str)
++        .map(str::trim)
++        .filter(|e| !e.is_empty())
++        .map(|e| e.chars().take(300).collect())
++        .unwrap_or_else(|| format!("Algo salió mal (código {estado}). Inténtalo de nuevo en unos minutos."))
++}
++
++/// `{ llave, usuario }` de entrar y canjear.
++fn sesion_de(cuerpo: &Value) -> Option<Sesion> {
++    let llave = cuerpo.get("llave")?.as_str()?.to_string();
++    let usuario = Usuario::desde_json(cuerpo.get("usuario")?)?;
++    llave.starts_with("jk_").then_some(Sesion { llave, usuario })
++}
++
++fn entrar(c: &Contexto, correo: &str, clave: &str) -> Resultado {
++    let cuerpo = json!({ "correo": correo, "clave": clave, "equipo": equipo() });
++    match pedir(c, "/api/launcher/entrar", None, Some(cuerpo)) {
++        Ok((200, cuerpo)) => sesion_de(&cuerpo).map_or_else(|| Resultado::Fallo(error_de(200, &Value::Null)), Resultado::Conectada),
++        Ok((estado, cuerpo)) => Resultado::Fallo(error_de(estado, &cuerpo)),
++        Err(e) => Resultado::Fallo(e),
++    }
++}
++
++/// Pide un código, avisa la dirección para abrir y espera a que la persona lo apruebe en la web.
++fn con_navegador(c: &Contexto, registro: bool, tx: &Sender<(u64, Resultado)>) -> Resultado {
++    let respuesta = match pedir(c, "/api/launcher/codigo", None, Some(json!({ "equipo": equipo() }))) {
++        Ok((200, cuerpo)) => cuerpo,
++        Ok((estado, cuerpo)) => return Resultado::Fallo(error_de(estado, &cuerpo)),
++        Err(e) => return Resultado::Fallo(e),
++    };
++    let texto = |clave: &str| respuesta.get(clave).and_then(Value::as_str).map(str::to_string);
++    let (Some(codigo), Some(codigo_usuario), Some(mut url)) = (texto("codigo"), texto("codigoUsuario"), texto("url")) else {
++        return Resultado::Fallo(error_de(200, &Value::Null));
++    };
++    // Solo se abre una página del mismo servidor.
++    if !url.starts_with(&format!("{}/", c.base)) {
++        return Resultado::Fallo(error_de(200, &Value::Null));
++    }
++    if registro {
++        url.push_str("&nuevo=1");
++    }
++    let intervalo = Duration::from_secs(respuesta.get("intervalo").and_then(Value::as_u64).unwrap_or(3).clamp(2, 10));
++    let vence = Duration::from_secs(respuesta.get("venceEn").and_then(Value::as_u64).unwrap_or(600).clamp(60, 1800));
++    let _ = tx.send((c.turno, Resultado::Esperando { url, codigo: codigo_usuario }));
++    let fin = Instant::now() + vence;
++    while Instant::now() < fin {
++        let siguiente = Instant::now() + intervalo;
++        while Instant::now() < siguiente {
++            if !c.vigente() {
++                return Resultado::Fallo(String::new());
++            }
++            std::thread::sleep(Duration::from_millis(200));
++        }
++        match pedir(c, "/api/launcher/token", None, Some(json!({ "codigo": codigo }))) {
++            Ok((200, cuerpo)) => {
++                return sesion_de(&cuerpo).map_or_else(|| Resultado::Fallo(error_de(200, &Value::Null)), Resultado::Conectada);
++            }
++            Ok((410, _)) => break,
++            Ok((202, _)) | Err(_) => {}
++            Ok((estado, cuerpo)) => return Resultado::Fallo(error_de(estado, &cuerpo)),
++        }
++    }
++    Resultado::Fallo("El código venció antes de que lo confirmaras. Vuelve a intentarlo.".into())
++}
++
++fn refrescar(c: &Contexto, llave: &str) -> Option<Resultado> {
++    match pedir(c, "/api/launcher/yo", Some(llave), None) {
++        Ok((200, cuerpo)) => Usuario::desde_json(&cuerpo).map(Resultado::Refrescada),
++        Ok((401, _)) => Some(Resultado::Cerrada),
++        // Sin internet o el servidor con problemas: se sigue con lo guardado.
++        _ => None,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn la_sesion_guardada_se_lee_y_se_valida() {
++        let carpeta = tempfile::tempdir().unwrap();
++        let archivo = carpeta.path().join("cuenta.json");
++        assert_eq!(leer_sesion(&archivo), None);
++        std::fs::write(&archivo, "esto no es json").unwrap();
++        assert_eq!(leer_sesion(&archivo), None);
++        let sesion =
++            Sesion { llave: "jk_abc".into(), usuario: Usuario { nombre: "Ana".into(), correo: "ana@x.pe".into(), creditos: 30, plan: None } };
++        std::fs::write(&archivo, serde_json::to_vec(&sesion).unwrap()).unwrap();
++        assert_eq!(leer_sesion(&archivo), Some(sesion.clone()));
++        let falsa = Sesion { llave: "otra".into(), ..sesion };
++        std::fs::write(&archivo, serde_json::to_vec(&falsa).unwrap()).unwrap();
++        assert_eq!(leer_sesion(&archivo), None);
++    }
++
++    #[test]
++    fn respuestas_del_servidor() {
++        let bien = json!({"llave": "jk_x", "usuario": {"nombre": "Lu", "correo": "lu@x.pe", "creditos": 1500, "plan": {"nombre": "Básico"}}});
++        assert_eq!(sesion_de(&bien).map(|s| (s.llave, s.usuario.creditos)), Some(("jk_x".into(), 1500)));
++        assert_eq!(sesion_de(&json!({"llave": "nada", "usuario": {"correo": "a@b"}})), None);
++        assert_eq!(sesion_de(&Value::Null), None);
++        assert_eq!(error_de(401, &json!({"error": "Correo o contraseña incorrectos."})), "Correo o contraseña incorrectos.");
++        assert!(error_de(500, &Value::Null).contains("500"));
++    }
++
++    /// Waits until the state is no longer `de_paso` (or 20 seconds).
++    fn esperar(cuenta: &mut ServicioCuenta, de_paso: impl Fn(&EstadoCuenta) -> bool) -> EstadoCuenta {
++        let fin = std::time::Instant::now() + Duration::from_secs(20);
++        loop {
++            let e = cuenta.estado();
++            if !de_paso(&e) || std::time::Instant::now() > fin {
++                return e;
++            }
++            std::thread::sleep(Duration::from_millis(100));
++        }
++    }
++
++    /// Against a local Forgenex (`npm start` with PUERTO and a throwaway CARPETA_DATOS):
++    /// `JACNEX_CUENTA_URL=http://127.0.0.1:<port> cargo test -p jacnex-studio-native -- --ignored de_punta_a_punta`
++    #[test]
++    #[ignore = "needs a local Forgenex in JACNEX_CUENTA_URL"]
++    fn de_punta_a_punta() {
++        let url = std::env::var("JACNEX_CUENTA_URL").unwrap();
++        assert!(crate::http::is_loopback(&url), "only a local server");
++        let web = ureq::Agent::new_with_config(ureq::Agent::config_builder().http_status_as_error(false).build());
++        let correo = format!("e2e{}@prueba.pe", std::process::id());
++        let clave = "una-clave-larga";
++        let r = web
++            .post(&format!("{url}/api/cuenta/registro"))
++            .header("content-type", "application/json")
++            .send(json!({"nombre": "Prueba", "correo": correo, "clave": clave}).to_string())
++            .unwrap();
++        assert_eq!(r.status().as_u16(), 201);
++        let galleta = r.headers().get("set-cookie").and_then(|v| v.to_str().ok()).and_then(|v| v.split(';').next()).unwrap().to_string();
++
++        let carpeta = tempfile::tempdir().unwrap();
++        let paths = Paths::under(carpeta.path());
++        let mut cuenta = ServicioCuenta::nuevo(&paths);
++        cuenta.enviar(OrdenCuenta::Entrar { correo: correo.clone(), clave: "mal-escrita".into() });
++        assert!(matches!(esperar(&mut cuenta, |e| *e == EstadoCuenta::Entrando), EstadoCuenta::SinSesion { error: Some(_) }));
++        cuenta.enviar(OrdenCuenta::Entrar { correo: correo.clone(), clave: clave.into() });
++        let EstadoCuenta::Conectada(u) = esperar(&mut cuenta, |e| *e == EstadoCuenta::Entrando) else { panic!("no entró") };
++        assert_eq!((u.correo.as_str(), u.creditos > 0), (correo.as_str(), true));
++
++        // The session survives a restart and is refreshed from the server.
++        let mut otra = ServicioCuenta::nuevo(&paths);
++        assert!(matches!(otra.estado(), EstadoCuenta::Conectada(_)));
++        otra.enviar(OrdenCuenta::Salir);
++        assert_eq!(otra.estado(), EstadoCuenta::SinSesion { error: None });
++        assert_eq!(leer_sesion(&paths.data.join("cuenta.json")), None);
++        // The first copy still holds the revoked key: refreshing signs it out.
++        std::thread::sleep(Duration::from_millis(500));
++        cuenta.enviar(OrdenCuenta::Actualizar);
++        assert!(matches!(esperar(&mut cuenta, |e| matches!(e, EstadoCuenta::Conectada(_))), EstadoCuenta::SinSesion { error: Some(_) }));
++
++        // In the browser: the page approves the code with the web session.
++        cuenta.enviar(OrdenCuenta::ConNavegador { registro: false });
++        let EstadoCuenta::EsperandoNavegador { url: abrir, codigo } =
++            esperar(&mut cuenta, |e| matches!(e, EstadoCuenta::SinSesion { .. } | EstadoCuenta::Entrando))
++        else {
++            panic!("no pidió código: {:?}", cuenta.estado())
++        };
++        assert!(abrir.starts_with(&format!("{url}/conectar?c=")));
++        let r = web
++            .post(&format!("{url}/api/launcher/aprobar"))
++            .header("cookie", &galleta)
++            .header("content-type", "application/json")
++            .send(json!({"codigo": codigo}).to_string())
++            .unwrap();
++        assert_eq!(r.status().as_u16(), 200);
++        assert!(matches!(esperar(&mut cuenta, |e| matches!(e, EstadoCuenta::EsperandoNavegador { .. })), EstadoCuenta::Conectada(_)));
++
++        // Cancelling stops waiting.
++        cuenta.enviar(OrdenCuenta::Salir);
++        cuenta.enviar(OrdenCuenta::ConNavegador { registro: true });
++        let e = esperar(&mut cuenta, |e| matches!(e, EstadoCuenta::SinSesion { .. } | EstadoCuenta::Entrando));
++        assert!(matches!(&e, EstadoCuenta::EsperandoNavegador { url, .. } if url.ends_with("&nuevo=1")), "{e:?}");
++        cuenta.enviar(OrdenCuenta::Cancelar);
++        assert_eq!(cuenta.estado(), EstadoCuenta::SinSesion { error: None });
++    }
++
++    #[test]
++    fn sin_sesion_y_sin_datos_no_entra() {
++        let carpeta = tempfile::tempdir().unwrap();
++        let mut cuenta = ServicioCuenta::nuevo(&Paths::under(carpeta.path()));
++        assert_eq!(cuenta.estado(), EstadoCuenta::SinSesion { error: None });
++        cuenta.enviar(OrdenCuenta::Entrar { correo: "  ".into(), clave: String::new() });
++        assert!(matches!(cuenta.estado(), EstadoCuenta::SinSesion { error: Some(_) }));
++    }
++}
+diff --git a/crates/native/src/lib.rs b/crates/native/src/lib.rs
+index cacef51..138458c 100644
+--- a/crates/native/src/lib.rs
++++ b/crates/native/src/lib.rs
+@@ -16,6 +16,7 @@ pub mod http;
+ pub mod install;
+ #[cfg(windows)]
+ mod jacnex_accesos;
++pub mod jacnex_cuenta;
+ pub mod login;
+ pub mod manifest;
+ #[cfg(any(windows, test))]
+diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
+index 3fddd45..2df3142 100644
+--- a/crates/ui-egui/src/app.rs
++++ b/crates/ui-egui/src/app.rs
+@@ -68,6 +68,11 @@ pub trait Host {
+     fn default_install_folder(&mut self, _kind: PackageKind, _arch: Option<Arch>) -> Option<String> {
+         None
+     }
++    /// La cuenta Jacnex (agregado por Jacnex). `None` donde no hay cuentas (la web, las pruebas):
++    /// entonces el launcher no pide iniciar sesión.
++    fn cuenta(&mut self) -> Option<&mut dyn jacnex_studio_core::cuenta::Cuenta> {
++        None
++    }
+     /// The URL to open when WhatsApp is clicked. Defaults to the web link.
+     fn discord_url(&self) -> &'static str {
+         jacnex_studio_core::catalog::DISCORD_URL
+diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
+index e9bc8a2..5754f27 100644
+--- a/crates/ui-egui/src/jacnex.rs
++++ b/crates/ui-egui/src/jacnex.rs
+@@ -8,6 +8,7 @@ use egui::{
+     Align, Align2, Color32, CornerRadius, FontId, Galley, Layout, Margin, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+     pos2, vec2,
+ };
++use jacnex_studio_core::cuenta::{EstadoCuenta, OrdenCuenta, Usuario};
+ use jacnex_studio_core::platform::pick_asset;
+ use jacnex_studio_core::protocol::JobPhase;
+ use jacnex_studio_core::status::AppStatus;
+@@ -18,6 +19,8 @@ use crate::theme::{self, Tokens};
+ use crate::views::Primary;
+ use crate::widgets::{self, Kind};
+ 
++mod acceso;
++
+ const HEADER_H: f32 = 60.0;
+ const SHELF_W: f32 = 248.0;
+ const SHELF_ROW_H: f32 = 50.0;
+@@ -233,12 +236,33 @@ impl LauncherUi {
+     pub(crate) fn jacnex_layout(&mut self, ui: &mut Ui, host: &mut dyn Host) {
+         let t = Tokens::get(ui.ctx());
+         let apps = en_apps(ui.ctx());
++        let bar = host.title_bar();
++        // With an account (the desktop), nothing but the sign-in screen until someone signs in.
++        let usuario = match host.cuenta() {
++            None => None,
++            Some(cuenta) => match cuenta.estado() {
++                EstadoCuenta::Conectada(u) => {
++                    acceso::refrescar(ui.ctx(), cuenta);
++                    Some(u)
++                }
++                estado => {
++                    self.jx_acceso(ui, cuenta, &estado, bar);
++                    return;
++                }
++            },
++        };
++        let mut orden = None;
+         egui::Panel::top("jx-cabecera")
+             .frame(egui::Frame::new().fill(AZUL))
+             .show_separator_line(false)
+             .exact_size(HEADER_H)
+             .resizable(false)
+-            .show(ui, |ui| self.jx_cabecera(ui, host.title_bar(), apps));
++            .show(ui, |ui| orden = self.jx_cabecera(ui, bar, apps, usuario.as_ref()));
++        if let Some(orden) = orden
++            && let Some(cuenta) = host.cuenta()
++        {
++            cuenta.enviar(orden);
++        }
+         if apps {
+             egui::Panel::left("jx-repisa")
+                 .frame(egui::Frame::new().fill(t.sunken))
+@@ -276,7 +300,8 @@ impl LauncherUi {
+ 
+     // ---- header ------------------------------------------------------------------------------
+ 
+-    fn jx_cabecera(&mut self, ui: &mut Ui, bar: TitleBar, apps: bool) {
++    /// Returns what the account menu asked for (signing out).
++    fn jx_cabecera(&mut self, ui: &mut Ui, bar: TitleBar, apps: bool, usuario: Option<&Usuario>) -> Option<OrdenCuenta> {
+         let ctx = ui.ctx().clone();
+         let full = ui.max_rect();
+         // On Inicio the band goes on under the header and scrolls with the page: the header shows
+@@ -287,6 +312,7 @@ impl LauncherUi {
+             widgets::title_bar_drag(ui);
+         }
+         let mut ir_a: Option<bool> = None;
++        let mut orden = None;
+         let compacta = full.width() < 960.0;
+         let con_forgenex = full.width() >= 1100.0;
+         ui.horizontal_centered(|ui| {
+@@ -322,6 +348,10 @@ impl LauncherUi {
+                 } else {
+                     ui.add_space(PAGE_PAD - 6.0);
+                 }
++                if let Some(u) = usuario {
++                    orden = acceso::boton_cuenta(ui, u);
++                    ui.add_space(2.0);
++                }
+                 if icono_blanco(ui, "⚙", "Configuración", false).clicked() {
+                     self.dialog = Some(Dialog::Settings);
+                 }
+@@ -330,8 +360,9 @@ impl LauncherUi {
+                     self.check_now();
+                 }
+                 ui.add_space(6.0);
++                let forgenex = usuario.map_or_else(|| "Forgenex · IA".to_string(), |u| format!("Forgenex · {}", acceso::creditos(u.creditos)));
+                 if con_forgenex
+-                    && pildora_llena(ui, "Forgenex · IA", false).on_hover_text("Imágenes y videos con IA, con tus créditos").clicked() {
++                    && pildora_llena(ui, &forgenex, false).on_hover_text("Imágenes y videos con IA, con tus créditos").clicked() {
+                     ctx.open_url(egui::OpenUrl::new_tab(FORGENEX_URL));
+                 }
+                 let pendientes = self.jx_pendientes();
+@@ -352,6 +383,7 @@ impl LauncherUi {
+         if let Some(apps) = ir_a {
+             ctx.data_mut(|d| d.insert_temp(egui::Id::unique(EN_APPS), apps));
+         }
++        orden
+     }
+ 
+     /// Apps with an update ready and nothing running.
+diff --git a/crates/ui-egui/src/jacnex/acceso.rs b/crates/ui-egui/src/jacnex/acceso.rs
+new file mode 100644
+index 0000000..ace5d16
+--- /dev/null
++++ b/crates/ui-egui/src/jacnex/acceso.rs
+@@ -0,0 +1,395 @@
++//! The Jacnex account (Forgenex's: the same credits and plan). Until someone signs in the window
++//! shows only the sign-in screen, with an email and password form and a button that signs in on
++//! the web; afterwards the header carries the account's menu. The desktop does the network calls
++//! and keeps the session (`Host::cuenta`); the web build has no account and never shows this.
++
++use std::time::Duration;
++
++use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
++use jacnex_studio_core::cuenta::{Cuenta, EstadoCuenta, OrdenCuenta, Usuario, miles};
++
++use super::{
++    AZUL, AZUL_CLARO, AZUL_OSCURO, CARD_RADIUS, FORGENEX_URL, HEADER_H, PAGE_PAD, PLANES_URL, banda_en, botones_ventana, color_tarjeta, fondo_pagina,
++    icono_blanco, mezcla, pintar_banda,
++};
++use crate::app::{Dialog, LauncherUi, TitleBar};
++use crate::theme::{self, Tokens};
++use crate::widgets;
++
++const ANCHO_CAJA: f32 = 404.0;
++const RELLENO_CAJA: i8 = 30;
++const BOTON_H: f32 = 44.0;
++/// How often the credits and the plan are read again while the launcher is open.
++const REFRESCO_S: f64 = 180.0;
++/// After asking for the account, how long to keep redrawing so the answer shows up.
++const ESPERA_RESPUESTA_S: f64 = 20.0;
++
++const ID_CORREO: &str = "jx-cuenta-correo";
++const ID_CLAVE: &str = "jx-cuenta-clave";
++const ID_AVISO: &str = "jx-cuenta-aviso";
++const ID_ABIERTO: &str = "jx-cuenta-abierto";
++const ID_LEIDA: &str = "jx-cuenta-leida";
++const ID_FOCO: &str = "jx-cuenta-foco";
++
++fn id(nombre: &str) -> egui::Id {
++    egui::Id::unique(nombre)
++}
++
++impl LauncherUi {
++    /// The whole window while nobody is signed in: the header with the logo, the band, and the
++    /// sign-in card on it.
++    pub(super) fn jx_acceso(&mut self, ui: &mut Ui, cuenta: &mut dyn Cuenta, estado: &EstadoCuenta, bar: TitleBar) {
++        let t = Tokens::get(ui.ctx());
++        let ctx = ui.ctx().clone();
++        // The answers come from another thread: look again until there is a session.
++        ctx.request_repaint_after(Duration::from_millis(250));
++        egui::Panel::top("jx-cabecera")
++            .frame(egui::Frame::new().fill(AZUL))
++            .show_separator_line(false)
++            .exact_size(HEADER_H)
++            .resizable(false)
++            .show(ui, |ui| self.jx_cabecera_acceso(ui, bar));
++        egui::CentralPanel::default().frame(egui::Frame::new().fill(fondo_pagina(&t))).show(ui, |ui| {
++            let area = ui.max_rect();
++            let banda = banda_en(&ctx, area.top() - HEADER_H);
++            pintar_banda(ui.painter(), Rect::from_min_max(area.min, pos2(area.right(), banda.bottom())), banda);
++            egui::ScrollArea::vertical().id_salt("jx-acceso").auto_shrink([false, false]).show(ui, |ui| {
++                let ancho = ANCHO_CAJA.min(ui.available_width() - 32.0).max(280.0);
++                ui.add_space(34.0);
++                ui.vertical_centered(|ui| caja(ui, &t, ancho, cuenta, estado));
++                ui.add_space(32.0);
++            });
++        });
++    }
++
++    /// The header before signing in: the logo, settings and the window buttons.
++    fn jx_cabecera_acceso(&mut self, ui: &mut Ui, bar: TitleBar) {
++        let ctx = ui.ctx().clone();
++        let full = ui.max_rect();
++        pintar_banda(ui.painter(), full, banda_en(&ctx, full.top()));
++        if bar != TitleBar::Native {
++            widgets::title_bar_drag(ui);
++        }
++        ui.horizontal_centered(|ui| {
++            ui.spacing_mut().item_spacing.x = 6.0;
++            if bar == TitleBar::MacOs {
++                ui.add_space(72.0);
++            }
++            ui.add_space(PAGE_PAD - 6.0);
++            let alto = 24.0;
++            let (logo, _) = ui.allocate_exact_size(vec2(alto * crate::icons::JACNEX_LOGO_ASPECT, alto), Sense::hover());
++            egui::Image::new(crate::icons::jacnex_logo(true)).alt_text("Jacnex Studio").paint_at(ui, logo);
++            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
++                if bar == TitleBar::Custom {
++                    botones_ventana(ui, HEADER_H);
++                    ui.add_space(4.0);
++                } else {
++                    ui.add_space(PAGE_PAD - 6.0);
++                }
++                if icono_blanco(ui, "⚙", "Configuración", false).clicked() {
++                    self.dialog = Some(Dialog::Settings);
++                }
++            });
++        });
++    }
++}
++
++/// The sign-in card.
++fn caja(ui: &mut Ui, t: &Tokens, ancho: f32, cuenta: &mut dyn Cuenta, estado: &EstadoCuenta) {
++    let sombra = egui::epaint::Shadow {
++        offset: [0, 14],
++        blur: 40,
++        spread: 0,
++        color: Color32::from_rgba_unmultiplied(5, 20, 70, if t.dark { 90 } else { 46 }),
++    };
++    egui::Frame::new()
++        .fill(color_tarjeta(t))
++        .corner_radius(CornerRadius::same(CARD_RADIUS))
++        .stroke(if t.dark { Stroke::new(1.0, t.line) } else { Stroke::NONE })
++        .shadow(sombra)
++        .inner_margin(Margin::same(RELLENO_CAJA))
++        .show(ui, |ui| {
++            let dentro = ancho - 2.0 * f32::from(RELLENO_CAJA);
++            ui.set_width(dentro);
++            ui.with_layout(Layout::top_down(Align::Min), |ui| {
++                ui.spacing_mut().item_spacing.y = 0.0;
++                match estado {
++                    EstadoCuenta::EsperandoNavegador { url, codigo } => esperando(ui, t, cuenta, url, codigo),
++                    EstadoCuenta::Entrando => formulario(ui, t, cuenta, None, true),
++                    EstadoCuenta::SinSesion { error } => formulario(ui, t, cuenta, error.as_deref(), false),
++                    // Drawn for one frame at most: the window switches to the launcher.
++                    EstadoCuenta::Conectada(_) => {
++                        ui.add(egui::Spinner::new().size(22.0).color(t.accent));
++                    }
++                }
++            });
++        });
++}
++
++fn titulo(ui: &mut Ui, t: &Tokens, texto: &str, detalle: &str) {
++    ui.label(RichText::new(texto).font(FontId::new(24.0, theme::display())).color(t.ink_strong));
++    ui.add_space(8.0);
++    ui.add(egui::Label::new(RichText::new(detalle).font(FontId::new(13.5, theme::medium())).color(t.muted)).wrap());
++    ui.add_space(22.0);
++}
++
++/// Email and password, or the browser.
++fn formulario(ui: &mut Ui, t: &Tokens, cuenta: &mut dyn Cuenta, error: Option<&str>, entrando: bool) {
++    let ctx = ui.ctx().clone();
++    let mut correo: String = ctx.data(|d| d.get_temp(id(ID_CORREO))).unwrap_or_default();
++    let mut clave: String = ctx.data(|d| d.get_temp(id(ID_CLAVE))).unwrap_or_default();
++    let mut aviso: Option<String> = ctx.data(|d| d.get_temp(id(ID_AVISO)));
++
++    titulo(ui, t, "Inicia sesión", "Entra con tu cuenta Jacnex: la misma de Forgenex, con tus créditos y tu plan.");
++
++    etiqueta(ui, t, "Correo");
++    let r_correo = campo(ui, t, id(ID_CORREO).with("campo"), &mut correo, false, "tu@correo.com", !entrando);
++    ui.add_space(14.0);
++    etiqueta(ui, t, "Contraseña");
++    let id_campo_clave = id(ID_CLAVE).with("campo");
++    let r_clave = campo(ui, t, id_campo_clave, &mut clave, true, "Tu contraseña", !entrando);
++    let enter = |r: &egui::Response| r.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
++    let mut enviar = enter(&r_clave);
++    if enter(&r_correo) {
++        if clave.is_empty() {
++            ctx.memory_mut(|m| m.request_focus(id_campo_clave));
++        } else {
++            enviar = true;
++        }
++    }
++    if r_correo.changed() || r_clave.changed() {
++        aviso = None;
++    }
++
++    if let Some(texto) = aviso.as_deref().or(error) {
++        ui.add_space(12.0);
++        ui.add(egui::Label::new(RichText::new(texto).font(FontId::new(13.0, theme::semibold())).color(t.bad)).wrap());
++    }
++    ui.add_space(20.0);
++
++    if entrando {
++        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), BOTON_H), Sense::hover());
++        ui.painter().rect_filled(rect, CornerRadius::same(10), theme::tint(t.ink_strong, 0.06));
++        let fuente = FontId::new(14.0, theme::bold());
++        let ancho = ui.painter().layout_no_wrap("Entrando…".into(), fuente.clone(), t.ink).size().x;
++        let giro = Rect::from_center_size(pos2(rect.center().x - ancho / 2.0 - 8.0, rect.center().y), vec2(18.0, 18.0));
++        egui::Spinner::new().size(16.0).color(t.accent).paint_at(ui, giro);
++        ui.painter().text(pos2(rect.center().x + 12.0, rect.center().y), Align2::CENTER_CENTER, "Entrando…", fuente, t.ink);
++    } else if boton(ui, t, "Iniciar sesión", true).clicked() {
++        enviar = true;
++    }
++
++    if enviar && !entrando {
++        let limpio = correo.trim().to_string();
++        if limpio.is_empty() || !limpio.contains('@') {
++            aviso = Some("Escribe el correo de tu cuenta.".into());
++        } else if clave.is_empty() {
++            aviso = Some("Escribe tu contraseña.".into());
++        } else {
++            aviso = None;
++            // The password goes once to the account and is not kept.
++            cuenta.enviar(OrdenCuenta::Entrar { correo: limpio, clave: std::mem::take(&mut clave) });
++        }
++    }
++
++    ui.add_space(16.0);
++    separador_o(ui, t);
++    ui.add_space(16.0);
++    let navegador = ui.add_enabled_ui(!entrando, |ui| boton(ui, t, "Entrar con el navegador", false)).inner;
++    if navegador.on_hover_text("Se abre app.jacnex.store: inicia sesión allí y vuelves conectado").clicked() {
++        aviso = None;
++        cuenta.enviar(OrdenCuenta::ConNavegador { registro: false });
++    }
++    ui.add_space(20.0);
++    ui.horizontal_wrapped(|ui| {
++        ui.spacing_mut().item_spacing.x = 4.0;
++        ui.label(RichText::new("¿No tienes cuenta?").font(FontId::new(13.5, theme::medium())).color(t.muted));
++        if ui.add_enabled_ui(!entrando, |ui| enlace(ui, t, "Créala gratis")).inner.clicked() {
++            aviso = None;
++            cuenta.enviar(OrdenCuenta::ConNavegador { registro: true });
++        }
++    });
++
++    ctx.data_mut(|d| {
++        d.insert_temp(id(ID_CORREO), correo);
++        d.insert_temp(id(ID_CLAVE), clave);
++        if let Some(a) = aviso {
++            d.insert_temp(id(ID_AVISO), a);
++        } else {
++            d.remove::<String>(id(ID_AVISO));
++        }
++    });
++}
++
++/// Signing in on the web: the code to check there, and a way back.
++fn esperando(ui: &mut Ui, t: &Tokens, cuenta: &mut dyn Cuenta, url: &str, codigo: &str) {
++    let ctx = ui.ctx().clone();
++    // The browser opens once for each code.
++    let abierto: Option<String> = ctx.data(|d| d.get_temp(id(ID_ABIERTO)));
++    if abierto.as_deref() != Some(codigo) {
++        ctx.open_url(egui::OpenUrl::new_tab(url));
++        ctx.data_mut(|d| d.insert_temp(id(ID_ABIERTO), codigo.to_string()));
++    }
++
++    titulo(ui, t, "Sigue en tu navegador", "Abrimos app.jacnex.store en tu navegador. Inicia sesión allí y confirma que aparece este código:");
++
++    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
++    ui.painter().rect(
++        rect,
++        CornerRadius::same(12),
++        theme::tint(t.accent, if t.dark { 0.16 } else { 0.07 }),
++        Stroke::new(1.0, theme::tint(t.accent, 0.35)),
++        StrokeKind::Inside,
++    );
++    let galley = widgets::caps(ui, codigo, 28.0, theme::mono_bold(), 4.0, t.ink_strong);
++    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.ink_strong);
++    ui.add_space(16.0);
++
++    ui.horizontal(|ui| {
++        ui.spacing_mut().item_spacing.x = 10.0;
++        ui.add(egui::Spinner::new().size(16.0).color(t.accent));
++        ui.label(RichText::new("Esperando la confirmación…").font(FontId::new(13.5, theme::medium())).color(t.muted));
++    });
++    ui.add_space(22.0);
++    if boton(ui, t, "Abrir el navegador otra vez", false).clicked() {
++        ctx.open_url(egui::OpenUrl::new_tab(url));
++    }
++    ui.add_space(16.0);
++    ui.vertical_centered(|ui| {
++        if enlace(ui, t, "Cancelar").clicked() {
++            cuenta.enviar(OrdenCuenta::Cancelar);
++        }
++    });
++}
++
++fn etiqueta(ui: &mut Ui, t: &Tokens, texto: &str) {
++    ui.label(RichText::new(texto).font(FontId::new(12.5, theme::semibold())).color(t.ink));
++    ui.add_space(6.0);
++}
++
++fn campo(ui: &mut Ui, t: &Tokens, id: egui::Id, texto: &mut String, clave: bool, pista: &str, activo: bool) -> egui::Response {
++    let edit = egui::TextEdit::singleline(texto)
++        .id(id)
++        .password(clave)
++        .desired_width(f32::INFINITY)
++        .margin(Margin::symmetric(12, 11))
++        .char_limit(256)
++        .font(FontId::new(14.5, theme::medium()))
++        .text_color(t.ink_strong)
++        .hint_text(RichText::new(pista).color(t.faint));
++    ui.add_enabled(activo, edit)
++}
++
++/// A button as wide as the card: brand blue, or outlined.
++fn boton(ui: &mut Ui, t: &Tokens, texto: &str, primario: bool) -> egui::Response {
++    let sense = if ui.is_enabled() { Sense::click() } else { Sense::hover() };
++    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), BOTON_H), sense);
++    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered() && ui.is_enabled(), 0.12);
++    let fuente = FontId::new(14.0, theme::bold());
++    let p = ui.painter();
++    let tinta = if primario {
++        p.rect_filled(rect, CornerRadius::same(10), mezcla(t.accent, AZUL_OSCURO, 0.35 * hover));
++        Color32::WHITE
++    } else {
++        p.rect(rect, CornerRadius::same(10), theme::tint(t.ink_strong, 0.05 * hover), Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
++        t.ink_strong
++    };
++    let tinta = if ui.is_enabled() { tinta } else { tinta.gamma_multiply(0.5) };
++    p.text(rect.center(), Align2::CENTER_CENTER, texto, fuente, tinta);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), texto));
++    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++fn enlace(ui: &mut Ui, t: &Tokens, texto: &str) -> egui::Response {
++    let resp = ui.add(egui::Label::new(RichText::new(texto).font(FontId::new(13.5, theme::bold())).color(t.accent_ink)).sense(Sense::click()));
++    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++/// A hairline with an "o" in the middle.
++fn separador_o(ui: &mut Ui, t: &Tokens) {
++    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
++    let p = ui.painter();
++    let c = rect.center();
++    let trazo = Stroke::new(1.0, t.line);
++    p.hline(rect.left()..=c.x - 18.0, c.y, trazo);
++    p.hline(c.x + 18.0..=rect.right(), c.y, trazo);
++    p.text(c, Align2::CENTER_CENTER, "o", FontId::new(13.0, theme::medium()), t.faint);
++}
++
++/// Reads the credits and the plan again every few minutes, and when the window comes back to the
++/// front (after buying a plan on the web, say).
++pub(super) fn refrescar(ctx: &egui::Context, cuenta: &mut dyn Cuenta) {
++    let (ahora, enfocada) = ctx.input(|i| (i.time, i.focused));
++    let ultima: Option<f64> = ctx.data(|d| d.get_temp(id(ID_LEIDA)));
++    let antes_enfocada: bool = ctx.data(|d| d.get_temp(id(ID_FOCO))).unwrap_or(enfocada);
++    let pedir = match ultima {
++        // The desktop already asked when it started.
++        None => false,
++        Some(u) => ahora - u >= REFRESCO_S || (enfocada && !antes_enfocada && ahora - u >= 15.0),
++    };
++    if pedir {
++        cuenta.enviar(OrdenCuenta::Actualizar);
++    }
++    let leida = if pedir || ultima.is_none() { ahora } else { ultima.unwrap_or(ahora) };
++    ctx.data_mut(|d| {
++        d.insert_temp(id(ID_LEIDA), leida);
++        d.insert_temp(id(ID_FOCO), enfocada);
++    });
++    if ahora - leida < ESPERA_RESPUESTA_S {
++        ctx.request_repaint_after(Duration::from_millis(500));
++    } else {
++        ctx.request_repaint_after(Duration::from_secs_f64(REFRESCO_S));
++    }
++}
++
++/// The account's round button in the header, and its menu.
++pub(super) fn boton_cuenta(ui: &mut Ui, u: &Usuario) -> Option<OrdenCuenta> {
++    let t = Tokens::get(ui.ctx());
++    let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
++    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12);
++    let p = ui.painter();
++    p.circle_filled(rect.center(), 16.0, mezcla(Color32::WHITE, AZUL_CLARO, 0.18 * hover));
++    p.text(rect.center(), Align2::CENTER_CENTER, u.inicial(), FontId::new(15.0, theme::bold()), AZUL);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Tu cuenta"));
++    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
++    let mut orden = None;
++    egui::Popup::menu(&resp).align(egui::RectAlign::BOTTOM_END).gap(8.0).width(264.0).show(|ui| {
++        ui.spacing_mut().item_spacing.y = 4.0;
++        egui::Frame::new().inner_margin(Margin { left: 4, right: 4, top: 4, bottom: 4 }).show(ui, |ui| {
++            ui.add(egui::Label::new(RichText::new(&u.nombre).font(FontId::new(15.0, theme::semibold())).color(t.ink_strong)).truncate());
++            ui.add(egui::Label::new(RichText::new(&u.correo).font(FontId::new(12.5, theme::medium())).color(t.muted)).truncate());
++            ui.add_space(6.0);
++            let plan = u.plan.as_deref().map_or_else(|| "Plan gratis".to_string(), |p| format!("Plan {p}"));
++            ui.label(RichText::new(format!("{plan} · {}", creditos(u.creditos))).font(FontId::new(13.0, theme::semibold())).color(t.accent_ink));
++        });
++        ui.separator();
++        if ui.button("Abrir Forgenex").clicked() {
++            ui.ctx().open_url(egui::OpenUrl::new_tab(FORGENEX_URL));
++        }
++        if ui.button("Ver planes y créditos").clicked() {
++            ui.ctx().open_url(egui::OpenUrl::new_tab(PLANES_URL));
++        }
++        ui.separator();
++        if ui.button("Cerrar sesión").clicked() {
++            orden = Some(OrdenCuenta::Salir);
++        }
++    });
++    orden
++}
++
++/// `1,500 créditos`, `1 crédito`.
++pub(super) fn creditos(n: i64) -> String {
++    if n == 1 { "1 crédito".to_string() } else { format!("{} créditos", miles(n)) }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::creditos;
++
++    #[test]
++    fn creditos_en_singular_y_plural() {
++        assert_eq!(creditos(1), "1 crédito");
++        assert_eq!(creditos(0), "0 créditos");
++        assert_eq!(creditos(3200), "3,200 créditos");
++    }
++}
+diff --git a/crates/ui-egui/tests/jacnex_capturas.rs b/crates/ui-egui/tests/jacnex_capturas.rs
+index eb59f8e..c77b668 100644
+--- a/crates/ui-egui/tests/jacnex_capturas.rs
++++ b/crates/ui-egui/tests/jacnex_capturas.rs
+@@ -1,6 +1,7 @@
+ //! Captures of Jacnex Studio's window, drawn off screen: no real backend, nothing on the desktop.
+ //! Run with JACNEX_STUDIO_SNAPSHOTS=<folder> to save them; without it the test only draws.
+ 
++use jacnex_studio_core::cuenta::{Cuenta, EstadoCuenta, OrdenCuenta, Usuario};
+ use jacnex_studio_core::protocol::{Backend, Capabilities, Command, Event, JobPhase, LatestRelease, Origin, Source};
+ use jacnex_studio_core::release::{Asset, Release};
+ use jacnex_studio_core::status::InstallSource;
+@@ -34,6 +35,26 @@ impl Backend for Fake {
+ struct NoHost;
+ impl Host for NoHost {}
+ 
++/// An account frozen in one state, for the captures.
++struct CuentaFija(EstadoCuenta);
++impl Cuenta for CuentaFija {
++    fn estado(&mut self) -> EstadoCuenta {
++        self.0.clone()
++    }
++    fn enviar(&mut self, _orden: OrdenCuenta) {}
++}
++
++struct HostConCuenta(CuentaFija);
++impl Host for HostConCuenta {
++    fn cuenta(&mut self) -> Option<&mut dyn Cuenta> {
++        Some(&mut self.0)
++    }
++}
++
++fn conectada() -> EstadoCuenta {
++    EstadoCuenta::Conectada(Usuario { nombre: "Ana Prueba".into(), correo: "ana@prueba.pe".into(), creditos: 3200, plan: Some("Creador".into()) })
++}
++
+ fn release(id: &str, v: &str, at: i64, mb: u64) -> Release {
+     let name = format!("{id}-{v}-windows-x64.msi");
+     Release {
+@@ -88,6 +109,24 @@ fn events(downloading: bool) -> Vec<Event> {
+ 
+ /// `elegir`: an app's page in Apps; `None`: Inicio.
+ fn capturar(nombre: &str, theme: egui::Theme, elegir: Option<&'static str>, downloading: bool, tamano: egui::Vec2) {
++    capturar_con(nombre, theme, elegir, downloading, tamano, None, None);
++}
++
++/// `cuenta`: the account's state, as the desktop has one; `None`: no account (the web build).
++/// `clic`: a button to press before the capture.
++fn capturar_con(
++    nombre: &str,
++    theme: egui::Theme,
++    elegir: Option<&'static str>,
++    downloading: bool,
++    tamano: egui::Vec2,
++    cuenta: Option<EstadoCuenta>,
++    clic: Option<&str>,
++) {
++    let mut host: Box<dyn Host> = match cuenta {
++        Some(estado) => Box::new(HostConCuenta(CuentaFija(estado))),
++        None => Box::new(NoHost),
++    };
+     jacnex_studio_ui_egui::i18n::set_test_lang(jacnex_studio_ui_egui::i18n::Lang::ES);
+     let mut backend: Option<Box<dyn Backend>> = Some(Box::new(Fake { events: events(downloading) }));
+     let mut harness = Harness::builder().with_size(tamano).with_theme(theme).build_ui_state(
+@@ -111,8 +150,8 @@ fn capturar(nombre: &str, theme: egui::Theme, elegir: Option<&'static str>, down
+                 }
+             }
+             if let Some(l) = launcher.as_mut() {
+-                l.logic(&ui.ctx().clone(), &mut NoHost);
+-                l.ui(ui, &mut NoHost);
++                l.logic(&ui.ctx().clone(), host.as_mut());
++                l.ui(ui, host.as_mut());
+             }
+         },
+         None,
+@@ -121,6 +160,10 @@ fn capturar(nombre: &str, theme: egui::Theme, elegir: Option<&'static str>, down
+         harness.step();
+     }
+     harness.run_steps(30);
++    if let Some(boton) = clic {
++        harness.get_by_label(boton).click();
++        harness.run_steps(10);
++    }
+     if let Some(dir) = std::env::var_os("JACNEX_STUDIO_SNAPSHOTS") {
+         let img = harness.render().expect("render");
+         img.save(std::path::Path::new(&dir).join(format!("{nombre}.png"))).expect("save");
+@@ -171,3 +214,46 @@ fn capturas_del_launcher() {
+     capturar("oscuro-lightnex", egui::Theme::Dark, Some("lightcraft"), false, normal);
+     capturar("claro-protonex", egui::Theme::Light, Some("figcraft"), false, normal);
+ }
++
++#[test]
++fn capturas_de_la_cuenta() {
++    let normal = egui::vec2(1180.0, 720.0);
++    let sin = || EstadoCuenta::SinSesion { error: None };
++    capturar_con("cuenta-claro-entrar", egui::Theme::Light, None, false, normal, Some(sin()), None);
++    capturar_con("cuenta-oscuro-entrar", egui::Theme::Dark, None, false, normal, Some(sin()), None);
++    let fallo = EstadoCuenta::SinSesion { error: Some("Correo o contraseña incorrectos.".into()) };
++    capturar_con("cuenta-claro-error-angosto", egui::Theme::Light, None, false, egui::vec2(760.0, 560.0), Some(fallo), None);
++    capturar_con("cuenta-claro-entrando", egui::Theme::Light, None, false, normal, Some(EstadoCuenta::Entrando), None);
++    capturar_con("cuenta-claro-conectada", egui::Theme::Light, None, false, normal, Some(conectada()), None);
++    capturar_con("cuenta-claro-menu", egui::Theme::Light, None, false, normal, Some(conectada()), Some("Tu cuenta"));
++    capturar_con("cuenta-oscuro-menu", egui::Theme::Dark, Some("photocraft"), false, normal, Some(conectada()), Some("Tu cuenta"));
++    let navegador = EstadoCuenta::EsperandoNavegador { url: "https://app.jacnex.store/conectar?c=K7PX-M2QA".into(), codigo: "K7PX-M2QA".into() };
++    capturar_con("cuenta-claro-navegador", egui::Theme::Light, None, false, normal, Some(navegador), None);
++}
++
++/// Without a session nothing of the launcher is drawn: no apps, only the sign-in card.
++#[test]
++fn sin_sesion_solo_se_ve_el_acceso() {
++    jacnex_studio_ui_egui::i18n::set_test_lang(jacnex_studio_ui_egui::i18n::Lang::ES);
++    for (estado, ve_apps) in [(EstadoCuenta::SinSesion { error: None }, false), (conectada(), true)] {
++        let mut backend: Option<Box<dyn Backend>> = Some(Box::new(Fake { events: events(false) }));
++        let mut host = HostConCuenta(CuentaFija(estado.clone()));
++        let mut harness = Harness::builder().with_size(egui::vec2(1180.0, 720.0)).build_ui_state(
++            move |ui, launcher: &mut Option<LauncherUi>| {
++                if launcher.is_none()
++                    && let Some(b) = backend.take()
++                {
++                    *launcher = Some(LauncherUi::new(ui.ctx(), b, Settings { notify: false, ..Settings::default() }));
++                }
++                if let Some(l) = launcher.as_mut() {
++                    l.logic(&ui.ctx().clone(), &mut host);
++                    l.ui(ui, &mut host);
++                }
++            },
++            None,
++        );
++        harness.run_steps(8);
++        assert_eq!(harness.query_by_label("Photonex").is_some(), ve_apps, "{estado:?}");
++        assert_eq!(harness.query_by_label("Iniciar sesión").is_some(), !ve_apps, "{estado:?}");
++    }
++}

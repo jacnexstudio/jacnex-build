@@ -36,25 +36,49 @@ jobs:
     outputs:
       compilar: ${{ steps.revisar.outputs.compilar }}
       ref: ${{ steps.revisar.outputs.ref }}
+      version: ${{ steps.revisar.outputs.version }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Comparar con la versión original
         id: revisar
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          NOMBRE: ${{ inputs.nombre }}
+          FORZAR: ${{ inputs.forzar }}
+          REF: ${{ inputs.ref }}
         run: |
-          original="${{ inputs.ref }}"
+          original="$REF"
           if [ -z "$original" ]; then
-            original=$(gh release view --repo '${{ inputs.upstream }}' --json tagName --jq .tagName)
+            original=$(gh release view --repo "$UPSTREAM" --json tagName --jq .tagName)
           fi
-          publicada=$(gh release view --repo '${{ github.repository }}' --json tagName --jq .tagName 2>/dev/null || echo "ninguna")
-          echo "Original: $original · Publicada en Jacnex: $publicada"
+          datos=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,body 2>/dev/null || echo '{}')
+          publicada=$(jq -r '.tagName // "ninguna"' <<<"$datos")
+          # Desde qué versión de ArtCraft se compiló la última: está en las notas de cada versión
+          # ("compilado desde storytold/... vX.Y.Z"). Jacnex puede tener un número mayor (ver abajo).
+          desde=$(jq -r '.body // ""' <<<"$datos" | grep -oE "compilado desde ${UPSTREAM} v?[0-9][^ ,]*" | head -n 1 | awk '{print $NF}' || true)
+          if [ -z "$desde" ]; then desde="$publicada"; fi
+          echo "Original: $original · Publicada en Jacnex: $publicada (desde $desde)"
           echo "ref=$original" >> "$GITHUB_OUTPUT"
-          if [ "${{ inputs.forzar }}" = "true" ] || [ "$original" != "$publicada" ]; then
+
+          # La versión que publica Jacnex. Las actualizaciones y el MSI solo reemplazan un programa
+          # por uno con un X.Y.Z mayor: si ArtCraft no tiene una más nueva que la publicada (se
+          # vuelve a compilar con cambios de Jacnex), se sube el último número de la publicada.
+          o="${original#v}"; p="${publicada#v}"; p="${p%%[-+]*}"
+          if [ "$publicada" = "ninguna" ] || { [ "$o" != "$p" ] && [ "$(printf '%s\n%s\n' "$o" "$p" | sort -V | tail -n 1)" = "$o" ]; }; then
+            version="$o"
+          else
+            IFS=. read -r ma mi pa <<<"$p"
+            version="$ma.$mi.$((pa + 1))"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [ "$FORZAR" = "true" ] || [ "$original" != "$desde" ]; then
             echo "compilar=true" >> "$GITHUB_OUTPUT"
-            echo "### ${{ inputs.nombre }}: se compila $original (publicada: $publicada)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### $NOMBRE: se compila $original como v$version (publicada: $publicada, desde $desde)" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "compilar=false" >> "$GITHUB_OUTPUT"
-            echo "### ${{ inputs.nombre }}: al día ($publicada)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### $NOMBRE: al día ($publicada, desde $desde)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   compilar:
@@ -66,4 +90,5 @@ jobs:
       upstream: ${{ inputs.upstream }}
       nombre: ${{ inputs.nombre }}
       ref: ${{ needs.revisar.outputs.ref }}
+      version: ${{ needs.revisar.outputs.version }}
       publicar: ${{ inputs.publicar }}
