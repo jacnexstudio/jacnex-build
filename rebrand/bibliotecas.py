@@ -333,6 +333,9 @@ def recompilar(carpeta, compilados=COMPILADOS):
 #  - winit pasaba a Windows las teclas con Alt, que en una ventana sin bordes (Jacnex Studio) dejan
 #    la ventana en el modo del menú del sistema, que no se ve: la tecla siguiente elegía una opción
 #    ("Minimizar"). Sin menú propio, Alt ya no abre ese menú, como hace GLFW.
+#  - Aun así la ventana se minimizaba al escribir "@" en el inicio de sesión: mientras la ventana no
+#    tiene botón de minimizar (Jacnex Studio lo quita en esa pantalla), winit no deja que Windows
+#    la minimice con ningún atajo (SC_MINIMIZE).
 # Si ArtCraft cambia de versión y el texto no está, se avisa y se compila sin el ajuste.
 TECLADO = [
     (
@@ -362,6 +365,24 @@ TECLADO = [
         "        },\n"
         "\n"
         "        WM_MOUSEMOVE => {\n",
+        ("**/.fingerprint/winit-*", "**/build/winit-*", "**/deps/libwinit-*", "**/deps/winit-*"),
+    ),
+    (
+        "winit",
+        "winit-*/*/src/platform_impl/windows/event_loop.rs",
+        "        WM_SYSCOMMAND => {\n"
+        "            if wparam == SC_RESTORE as usize {\n",
+        "        WM_SYSCOMMAND => {\n"
+        "            // Jacnex: sin el botón de minimizar (Jacnex Studio lo quita en el inicio de sesión),\n"
+        "            // Windows no minimiza la ventana por su cuenta: ni atajos de teclado, ni el menú del\n"
+        "            // sistema, ni la barra de tareas. El botón propio de la ventana sí (no pasa por aquí).\n"
+        "            if wparam & 0xfff0 == SC_MINIMIZE as usize\n"
+        "                && !userdata.window_state_lock().window_flags.contains(WindowFlags::MINIMIZABLE)\n"
+        "            {\n"
+        "                result = ProcResult::Value(0);\n"
+        "                return;\n"
+        "            }\n"
+        "            if wparam == SC_RESTORE as usize {\n",
         ("**/.fingerprint/winit-*", "**/build/winit-*", "**/deps/libwinit-*", "**/deps/winit-*"),
     ),
 ]

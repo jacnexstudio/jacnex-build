@@ -1,5 +1,5 @@
 diff --git a/apps/jacnex-studio/src/main.rs b/apps/jacnex-studio/src/main.rs
-index 9a6de40..137c61f 100644
+index 9a6de40..02f45b6 100644
 --- a/apps/jacnex-studio/src/main.rs
 +++ b/apps/jacnex-studio/src/main.rs
 @@ -663,9 +663,15 @@ struct DesktopHost {
@@ -37,14 +37,6 @@ index 9a6de40..137c61f 100644
              starts,
              windowless,
              run_again,
-@@ -1024,6 +1040,7 @@ impl eframe::App for Shell<'_> {
-             }
-         }
-         craft_quit::on_close_request(ctx);
-+        jacnex_studio_ui_egui::volver_si_se_minimiza_al_escribir(ctx);
-     }
- 
-     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
 diff --git a/crates/core/src/cuenta.rs b/crates/core/src/cuenta.rs
 new file mode 100644
 index 0000000..44cfd6b
@@ -675,7 +667,7 @@ index cacef51..138458c 100644
  pub mod manifest;
  #[cfg(any(windows, test))]
 diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
-index 3fddd45..691ce8b 100644
+index 3fddd45..2563b6e 100644
 --- a/crates/ui-egui/src/app.rs
 +++ b/crates/ui-egui/src/app.rs
 @@ -68,6 +68,11 @@ pub trait Host {
@@ -707,7 +699,22 @@ index 3fddd45..691ce8b 100644
              pending_toasts: Vec::new(),
              pin_dragging: None,
          }
-@@ -355,9 +363,26 @@ impl LauncherUi {
+@@ -327,11 +335,13 @@ impl LauncherUi {
+     }
+ 
+     /// Input on its way to egui (the shell's `raw_input_hook`): with fewer animations asked for,
+-    /// a mouse wheel scrolls at once instead of gliding.
++    /// a mouse wheel scrolls at once instead of gliding. Jacnex: no keyboard shortcuts on the
++    /// sign-in screen (`jacnex::teclado`).
+     pub fn raw_input(&self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+         if self.reduce_motion {
+             motion::unsmooth_wheel(ctx, raw);
+         }
++        crate::jacnex::teclado(ctx, raw, self.sin_sesion);
+     }
+ 
+     /// Installed apps with an update waiting (the tray shows the count). Hidden apps are left out,
+@@ -355,9 +365,26 @@ impl LauncherUi {
      }
  
      pub(crate) fn send(&mut self, command: Command) {
@@ -734,7 +741,7 @@ index 3fddd45..691ce8b 100644
      /// The toolbar's check button. The side effects run once, when the pass flushes.
      pub(crate) fn check_now_from_ui(&mut self) {
          self.act(UiAction::CheckNow);
-@@ -402,7 +427,11 @@ impl LauncherUi {
+@@ -402,7 +429,11 @@ impl LauncherUi {
                  continue;
              }
              match action {
@@ -747,7 +754,7 @@ index 3fddd45..691ce8b 100644
                  UiAction::Launch(id) => {
                      let flags = self.settings.launch_flags.get(id).map_or("", String::as_str);
                      // The dialog only saves flags that split, but the settings file can be edited by hand.
-@@ -510,6 +539,7 @@ impl LauncherUi {
+@@ -510,6 +541,7 @@ impl LauncherUi {
  
      /// Non-drawing work: runs every frame and also while the window is hidden in the tray.
      pub fn logic(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
@@ -755,7 +762,7 @@ index 3fddd45..691ce8b 100644
          // Messages made here (toasts, alerts) are drawn later, so use the language the UI can
          // actually show: English where the system has no CJK face for the preference.
          set_current(effective_lang(&self.settings.language));
-@@ -767,7 +797,7 @@ impl LauncherUi {
+@@ -767,7 +799,7 @@ impl LauncherUi {
          let to_update: Vec<(String, String)> = self
              .entries
              .iter()
@@ -764,7 +771,7 @@ index 3fddd45..691ce8b 100644
              .filter_map(|e| {
                  let v = e.latest_label()?;
                  if self.auto_update_attempted.contains(&(e.app.id.to_string(), v.clone())) { None } else { Some((e.app.id.to_string(), v)) }
-@@ -786,6 +816,12 @@ impl LauncherUi {
+@@ -786,6 +818,12 @@ impl LauncherUi {
                  self.send(Command::Install { app: id });
              }
          }
@@ -777,7 +784,7 @@ index 3fddd45..691ce8b 100644
          if self.caps.self_update
              && let Some(r) = &self.launcher_update
              && self.launcher_job.is_none()
-@@ -825,6 +861,7 @@ impl LauncherUi {
+@@ -825,6 +863,7 @@ impl LauncherUi {
  
      /// Draws the launcher.
      pub fn ui(&mut self, ui: &mut egui::Ui, host: &mut dyn Host) {
@@ -785,7 +792,7 @@ index 3fddd45..691ce8b 100644
          let ctx = ui.ctx().clone();
          self.begin_ui_frame(&ctx);
          if host.title_bar() == TitleBar::MacOs && ctx.input_mut(|i| i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::M)) {
-@@ -1170,6 +1207,24 @@ mod tests {
+@@ -1170,6 +1209,24 @@ mod tests {
          assert_eq!(drawable_lang("fr", Some(Lang::ZH_CN)), Lang::FR);
      }
  
@@ -811,7 +818,7 @@ index 3fddd45..691ce8b 100644
      /// Two controls queueing the same command in one pass are two gestures and must both reach the
      /// backend.
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
-index e9bc8a2..b73b825 100644
+index e9bc8a2..a95bab3 100644
 --- a/crates/ui-egui/src/jacnex.rs
 +++ b/crates/ui-egui/src/jacnex.rs
 @@ -8,6 +8,7 @@ use egui::{
@@ -914,40 +921,61 @@ index e9bc8a2..b73b825 100644
      }
  
      /// Apps with an update ready and nothing running.
-@@ -1429,3 +1461,35 @@ mod tests {
+@@ -1429,3 +1461,56 @@ mod tests {
          assert_eq!(url_forgenex("Café & sol\n", true), "https://jacnex.store/app?tipo=video&prompt=Caf%C3%A9%20%26%20sol");
      }
  }
 +
-+/// Windows can minimize the borderless window while an "@" is typed with Alt or AltGr (Latin
-+/// American keyboards: AltGr+Q, Ctrl+Alt+Q, Alt+64). A window minimized a moment after a key went
-+/// into a text field, with no click in between, comes straight back. Called from the app's
-+/// `logic`, which runs while the window is minimized too.
-+pub fn volver_si_se_minimiza_al_escribir(ctx: &egui::Context) {
++/// The keyboard on its way to egui (the shell's `raw_input_hook`, which also runs while the window
++/// is minimized). On the sign-in screen there are no shortcuts, so typing the email can only write
++/// text: "@" is AltGr+Q, Ctrl+Alt+Q or Alt+64 on Latin American keyboards, and Windows minimized
++/// the borderless window on it.
++/// - Keys pressed with Ctrl, Alt or the command key reach no shortcut. The text they type (the
++///   "@") still arrives, and so do copy, cut and paste, which are events of their own.
++/// - The window has no minimize button for the system while signing in (the header's own still
++///   works), and the patched winit then lets no shortcut, system menu or taskbar minimize it.
++/// - A window minimized anyway right after a key (in the same burst of input, or up to two seconds
++///   later) with no click in between comes straight back. On any text field too.
++pub fn teclado(ctx: &egui::Context, raw: &mut egui::RawInput, inicio_de_sesion: bool) {
 +    const MARGEN: f64 = 2.0;
-+    let id = egui::Id::unique("jx-ultima-tecla-en-campo");
++    let id_boton = egui::Id::unique("jx-sin-boton-minimizar");
++    let id_tecla = egui::Id::unique("jx-ultima-tecla-en-campo");
++
++    if ctx.data(|d| d.get_temp::<bool>(id_boton)).unwrap_or(false) != inicio_de_sesion {
++        ctx.data_mut(|d| d.insert_temp(id_boton, inicio_de_sesion));
++        ctx.send_viewport_cmd_to(
++            egui::ViewportId::ROOT,
++            egui::ViewportCommand::EnableButtons { close: true, minimized: !inicio_de_sesion, maximize: true },
++        );
++    }
++
++    let ahora = raw.time.unwrap_or_default();
++    let minimizada = raw.viewports.get(&raw.viewport_id).and_then(|v| v.minimized) == Some(true);
++    let clic = raw.events.iter().any(|e| matches!(e, egui::Event::PointerButton { pressed: true, .. }));
++    let tecla = raw.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)));
 +    let en_campo = ctx.memory(|m| m.focused()).is_some_and(|f| egui::TextEdit::load_state(ctx, f).is_some());
-+    let (ahora, tecla, clic, minimizada) = ctx.input(|i| {
-+        (
-+            i.time,
-+            i.events.iter().any(|e| matches!(e, egui::Event::Key { .. } | egui::Event::Text(_))),
-+            i.pointer.any_pressed(),
-+            i.viewport().minimized == Some(true),
-+        )
-+    });
++    let vigila = inicio_de_sesion || en_campo;
++
++    if inicio_de_sesion {
++        raw.events.retain(|e| !matches!(e, egui::Event::Key { modifiers, .. } if modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd));
++    }
++
 +    if clic {
 +        // The minimize button, or anything else clicked: a minimize after that is the user's.
-+        ctx.data_mut(|d| d.remove::<f64>(id));
-+    } else if tecla && en_campo && !minimizada {
-+        ctx.data_mut(|d| d.insert_temp(id, ahora));
++        ctx.data_mut(|d| d.remove::<f64>(id_tecla));
++        return;
++    }
++    if tecla && vigila && !minimizada {
++        ctx.data_mut(|d| d.insert_temp(id_tecla, ahora));
 +        // A frame soon after, to catch a minimize those keys caused.
 +        ctx.request_repaint_after(std::time::Duration::from_millis(200));
 +    }
-+    if minimizada && ctx.data(|d| d.get_temp::<f64>(id)).is_some_and(|t| ahora - t < MARGEN) {
-+        ctx.data_mut(|d| d.remove::<f64>(id));
++    let reciente = ctx.data(|d| d.get_temp::<f64>(id_tecla)).is_some_and(|t| ahora - t < MARGEN);
++    if minimizada && ((tecla && vigila) || reciente) {
++        ctx.data_mut(|d| d.remove::<f64>(id_tecla));
 +        log::info!("the window minimized while typing in a field; restoring it");
-+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
++        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
++        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
 +    }
 +}
 diff --git a/crates/ui-egui/src/jacnex/acceso.rs b/crates/ui-egui/src/jacnex/acceso.rs
@@ -1352,14 +1380,14 @@ index 0000000..ace5d16
 +    }
 +}
 diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
-index 29d67bf..96a4d77 100644
+index 29d67bf..e2c3295 100644
 --- a/crates/ui-egui/src/lib.rs
 +++ b/crates/ui-egui/src/lib.rs
 @@ -40,6 +40,7 @@ mod views;
  mod widgets;
  
  pub use app::{Host, LauncherUi, TitleBar};
-+pub use jacnex::volver_si_se_minimiza_al_escribir;
++pub use jacnex::teclado as teclado_jacnex;
  pub use i18n::{
      Lang, LangInfo, current, detect_system_lang_in_background, fmt, has, lang_from_tag, message, msg, set_current, set_system_locales, system_lang,
      t, t_id, tn, tr, tr_ctx, tr_id, trn,
@@ -1498,71 +1526,118 @@ index eb59f8e..c77b668 100644
 +}
 diff --git a/crates/ui-egui/tests/jx_minimizar.rs b/crates/ui-egui/tests/jx_minimizar.rs
 new file mode 100644
-index 0000000..d4a3b83
+index 0000000..2637b5c
 --- /dev/null
 +++ b/crates/ui-egui/tests/jx_minimizar.rs
-@@ -0,0 +1,64 @@
-+//! Jacnex: a window that minimizes while an "@" is typed into a field comes back by itself.
+@@ -0,0 +1,111 @@
++//! Jacnex: the sign-in screen has no keyboard shortcuts, so typing the email ("@" is AltGr+Q,
++//! Ctrl+Alt+Q or Alt+64 on Latin American keyboards) only writes text and never minimizes the
++//! window; a window that minimizes anyway while typing comes back by itself.
 +
-+use egui_kittest::Harness;
-+use egui_kittest::kittest::Queryable as _;
++use egui::{Event, Key, Modifiers, RawInput, ViewportCommand, ViewportId};
++use jacnex_studio_ui_egui::teclado_jacnex;
 +
-+fn pedidos(h: &Harness<'_>) -> Vec<egui::ViewportCommand> {
-+    h.output().viewport_output.values().flat_map(|v| v.commands.iter().cloned()).collect()
++const ALT_GR: Modifiers = Modifiers { alt: true, ctrl: true, shift: false, mac_cmd: false, command: true };
++
++fn tecla(key: Key, modifiers: Modifiers) -> Event {
++    Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
 +}
 +
-+fn ventana(texto: &mut String) -> impl FnMut(&mut egui::Ui) + '_ {
-+    move |ui| {
-+        jacnex_studio_ui_egui::volver_si_se_minimiza_al_escribir(ui.ctx());
++fn entrada(t: f64, minimizada: bool, events: Vec<Event>) -> RawInput {
++    let mut raw = RawInput { time: Some(t), events, ..Default::default() };
++    raw.viewports.entry(ViewportId::ROOT).or_default().minimized = Some(minimizada);
++    raw
++}
++
++/// Runs the hook and then a frame, and returns what egui got and the window commands sent.
++fn paso(ctx: &egui::Context, mut raw: RawInput, inicio_de_sesion: bool) -> (Vec<Event>, Vec<ViewportCommand>) {
++    teclado_jacnex(ctx, &mut raw, inicio_de_sesion);
++    let eventos = raw.events.clone();
++    let mut salida = ctx.run_ui(raw, |ui| {
 +        ui.label("Correo");
-+        ui.add(egui::TextEdit::singleline(texto).id(egui::Id::unique("campo")).hint_text("Correo"));
-+    }
-+}
-+
-+fn minimizar(h: &mut Harness<'_>, si: bool) {
-+    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().minimized = Some(si);
-+}
-+
-+#[test]
-+fn a_minimize_right_after_typing_in_a_field_is_undone() {
-+    let mut texto = String::new();
-+    let mut h = Harness::new_ui(ventana(&mut texto));
-+    h.run();
-+    h.get_all_by_role(egui::accesskit::Role::TextInput).next().expect("field").click();
-+    h.run();
-+    h.input_mut().events.push(egui::Event::Text("@".into()));
-+    h.step();
-+    minimizar(&mut h, true);
-+    h.step();
-+    let p = pedidos(&h);
-+    assert!(p.contains(&egui::ViewportCommand::Minimized(false)), "{p:?}");
-+    assert!(p.contains(&egui::ViewportCommand::Focus), "{p:?}");
-+}
-+
-+#[test]
-+fn a_minimize_after_a_click_or_without_typing_stays() {
-+    let mut texto = String::new();
-+    let mut h = Harness::new_ui(ventana(&mut texto));
-+    h.run();
-+    // Never typed: a minimize is the user's.
-+    minimizar(&mut h, true);
-+    h.step();
-+    assert!(!pedidos(&h).contains(&egui::ViewportCommand::Minimized(false)));
-+    minimizar(&mut h, false);
-+    h.run();
-+    // Typed, then clicked (the minimize button, say).
-+    h.get_all_by_role(egui::accesskit::Role::TextInput).next().expect("field").click();
-+    h.run();
-+    h.input_mut().events.push(egui::Event::Text("a".into()));
-+    h.step();
-+    h.input_mut().events.push(egui::Event::PointerButton {
-+        pos: egui::pos2(300.0, 300.0),
-+        button: egui::PointerButton::Primary,
-+        pressed: true,
-+        modifiers: egui::Modifiers::NONE,
 +    });
-+    h.step();
-+    minimizar(&mut h, true);
-+    h.step();
-+    assert!(!pedidos(&h).contains(&egui::ViewportCommand::Minimized(false)));
++    // No renderer here: the font texture is not uploaded anywhere.
++    salida.textures_delta.clear();
++    let pedidos = salida.viewport_output.values().flat_map(|v| v.commands.iter().cloned()).collect();
++    (eventos, pedidos)
++}
++
++const SIN_MINIMIZAR: ViewportCommand = ViewportCommand::EnableButtons { close: true, minimized: false, maximize: true };
++const CON_MINIMIZAR: ViewportCommand = ViewportCommand::EnableButtons { close: true, minimized: true, maximize: true };
++
++#[test]
++fn signing_in_has_no_shortcuts_but_the_at_sign_and_paste_arrive() {
++    let ctx = egui::Context::default();
++    let eventos = vec![
++        tecla(Key::Q, ALT_GR),
++        Event::Text("@".into()),
++        tecla(Key::Num6, Modifiers::ALT),
++        tecla(Key::Plus, Modifiers::COMMAND),
++        Event::Paste("hola@correo.com".into()),
++        tecla(Key::A, Modifiers::NONE),
++        tecla(Key::Tab, Modifiers::SHIFT),
++    ];
++    let (llegan, _) = paso(&ctx, entrada(1.0, false, eventos), true);
++    assert_eq!(
++        llegan,
++        vec![Event::Text("@".into()), Event::Paste("hola@correo.com".into()), tecla(Key::A, Modifiers::NONE), tecla(Key::Tab, Modifiers::SHIFT)]
++    );
++    // Once signed in, shortcuts work again.
++    let (llegan, _) = paso(&ctx, entrada(2.0, false, vec![tecla(Key::Plus, Modifiers::COMMAND)]), false);
++    assert_eq!(llegan, vec![tecla(Key::Plus, Modifiers::COMMAND)]);
++}
++
++#[test]
++fn the_system_minimize_button_is_off_only_while_signing_in() {
++    let ctx = egui::Context::default();
++    let (_, pedidos) = paso(&ctx, entrada(1.0, false, vec![]), true);
++    assert!(pedidos.contains(&SIN_MINIMIZAR), "{pedidos:?}");
++    // Sent once, not every frame.
++    let (_, pedidos) = paso(&ctx, entrada(1.1, false, vec![]), true);
++    assert!(!pedidos.contains(&SIN_MINIMIZAR), "{pedidos:?}");
++    let (_, pedidos) = paso(&ctx, entrada(1.2, false, vec![]), false);
++    assert!(pedidos.contains(&CON_MINIMIZAR), "{pedidos:?}");
++    // Never signing in, it is never touched.
++    let otro = egui::Context::default();
++    let (_, pedidos) = paso(&otro, entrada(1.0, false, vec![]), false);
++    assert!(!pedidos.iter().any(|p| matches!(p, ViewportCommand::EnableButtons { .. })), "{pedidos:?}");
++}
++
++#[test]
++fn a_minimize_in_the_same_burst_as_the_at_sign_is_undone() {
++    // Windows minimized the window before egui drew a frame with the key: the first input egui
++    // sees already says minimized.
++    let ctx = egui::Context::default();
++    paso(&ctx, entrada(1.0, false, vec![]), true);
++    let (_, pedidos) = paso(&ctx, entrada(1.1, true, vec![tecla(Key::Q, ALT_GR), Event::Text("@".into())]), true);
++    assert!(pedidos.contains(&ViewportCommand::Minimized(false)), "{pedidos:?}");
++    assert!(pedidos.contains(&ViewportCommand::Focus), "{pedidos:?}");
++}
++
++#[test]
++fn a_minimize_just_after_typing_is_undone() {
++    let ctx = egui::Context::default();
++    paso(&ctx, entrada(1.0, false, vec![Event::Text("@".into())]), true);
++    let (_, pedidos) = paso(&ctx, entrada(1.5, true, vec![]), true);
++    assert!(pedidos.contains(&ViewportCommand::Minimized(false)), "{pedidos:?}");
++}
++
++#[test]
++fn a_minimize_after_a_click_without_typing_or_much_later_stays() {
++    let clic = Event::PointerButton { pos: egui::pos2(10.0, 10.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE };
++    // Never typed.
++    let ctx = egui::Context::default();
++    let (_, pedidos) = paso(&ctx, entrada(1.0, true, vec![]), true);
++    assert!(!pedidos.contains(&ViewportCommand::Minimized(false)), "{pedidos:?}");
++    // Typed, then clicked (the header's minimize button, say).
++    let ctx = egui::Context::default();
++    paso(&ctx, entrada(1.0, false, vec![Event::Text("a".into())]), true);
++    paso(&ctx, entrada(1.2, false, vec![clic]), true);
++    let (_, pedidos) = paso(&ctx, entrada(1.3, true, vec![]), true);
++    assert!(!pedidos.contains(&ViewportCommand::Minimized(false)), "{pedidos:?}");
++    // Typed long ago.
++    let ctx = egui::Context::default();
++    paso(&ctx, entrada(1.0, false, vec![Event::Text("a".into())]), true);
++    let (_, pedidos) = paso(&ctx, entrada(9.0, true, vec![]), true);
++    assert!(!pedidos.contains(&ViewportCommand::Minimized(false)), "{pedidos:?}");
 +}
