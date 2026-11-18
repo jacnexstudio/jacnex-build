@@ -88,7 +88,8 @@ jobs:
         with:
           workspaces: src
 
-      # Después de la caché: cambia la copia descargada de craft-update (actualizarse sin firma).
+      # Después de la caché: cambia la copia descargada de craft-update (actualizarse sin firma, y
+      # que las apps pongan al día un Jacnex Studio atascado).
       - name: Ajustar bibliotecas de ArtCraft
         run: python -B jb/rebrand/bibliotecas.py src
 
@@ -128,12 +129,18 @@ jobs:
         run: |
           $exes = @(Get-ChildItem -File -Filter *.exe)
           if (-not $exes) { throw 'No hay ningún .exe compilado' }
+          $ponenAlDia = 0
           foreach ($exe in $exes) {
             $texto = [IO.File]::ReadAllText($exe.FullName, [Text.Encoding]::GetEncoding(28591))
             if ($texto.Contains("so it doesn't install updates")) {
               throw "$($exe.Name) tiene craft-update sin ajustar: no se actualizaría sin firma digital"
             }
+            if ($texto.Contains('JacnexSuite/LauncherUpdate')) { $ponenAlDia++ }
             Write-Output "$($exe.Name): craft-update ajustado"
+          }
+          # Las apps ponen al día un Jacnex Studio atascado en 0.19.2 (ver rebrand/bibliotecas.py).
+          if ('${{ inputs.proyecto }}' -ne 'launcher' -and $ponenAlDia -eq 0) {
+            throw 'La app no tiene el código que pone al día Jacnex Studio (bibliotecas.py)'
           }
 
       # Jacnex Studio instala las apps desde su zip portable y busca el .exe en la raíz del zip;
