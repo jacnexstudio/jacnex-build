@@ -19,6 +19,8 @@ anterior (la caché trajo craft-update ya compilado) y no puede actualizarse sol
 exige la firma. Pero sí instala las apps nuevas, que solo se comprueban con su SHA-256. Por eso
 cada app de Jacnex, al abrirse en Windows, revisa el Jacnex Studio instalado y, si es uno de esos,
 lo actualiza a la última versión (obligatorio, con aviso y la ventana de Windows Installer).
+
+Ajuste: escribir "@" en Windows (ver TECLADO).
 """
 
 import os
@@ -230,7 +232,7 @@ COMPILADOS = (
 )
 
 
-def recompilar(carpeta):
+def recompilar(carpeta, compilados=COMPILADOS):
     """Cargo no revisa si cambió una dependencia git (la reconoce por su revisión) y la caché de Rust
     puede traerla ya compilada: se borra lo compilado de craft-update (huellas y bibliotecas) para
     que se compile con el ajuste. Borrar solo las huellas no bastó: Jacnex Studio 0.19.2 salió con
@@ -240,7 +242,7 @@ def recompilar(carpeta):
     if not destino.is_dir():
         return 0
     borradas = 0
-    for patron in COMPILADOS:
+    for patron in compilados:
         for ruta in destino.glob(patron):
             if ruta.is_dir():
                 shutil.rmtree(ruta, ignore_errors=True)
@@ -250,13 +252,79 @@ def recompilar(carpeta):
     return borradas
 
 
+
+# Ajustes de teclado en Windows, en egui-winit y winit (dependencias git de ArtCraft). En el teclado
+# latinoamericano "@" es AltGr+Q, que Windows también da con Ctrl+Alt+Q, o Alt+64.
+#  - egui-winit tiraba el texto escrito con Ctrl apretado (para no escribir con Ctrl+C), y Ctrl+Alt
+#    es AltGr: con Ctrl+Alt+Q no salía la "@".
+#  - winit pasaba a Windows las teclas con Alt, que en una ventana sin bordes (Jacnex Studio) dejan
+#    la ventana en el modo del menú del sistema, que no se ve: la tecla siguiente elegía una opción
+#    ("Minimizar"). Sin menú propio, Alt ya no abre ese menú, como hace GLFW.
+# Si ArtCraft cambia de versión y el texto no está, se avisa y se compila sin el ajuste.
+TECLADO = [
+    (
+        "egui-winit",
+        "egui-*/*/crates/egui-winit/src/lib.rs",
+        "                let is_cmd =\n"
+        "                    self.modifiers.ctrl || self.modifiers.command || self.modifiers.mac_cmd;\n",
+        "                // Jacnex: en Windows Ctrl+Alt es AltGr (\"@\" es Ctrl+Alt+Q en el teclado latinoamericano).\n"
+        "                let is_cmd = (self.modifiers.ctrl || self.modifiers.command || self.modifiers.mac_cmd)\n"
+        "                    && !(cfg!(windows) && self.modifiers.ctrl && self.modifiers.alt);\n",
+        ("**/.fingerprint/egui-winit-*", "**/build/egui-winit-*", "**/deps/libegui_winit-*", "**/deps/egui_winit-*"),
+    ),
+    (
+        "winit",
+        "winit-*/*/src/platform_impl/windows/event_loop.rs",
+        "            result = ProcResult::DefWindowProc(wparam);\n"
+        "        },\n"
+        "\n"
+        "        WM_MOUSEMOVE => {\n",
+        "            // Jacnex: sin menú propio, Alt no abre el menú del sistema (SC_KEYMENU): en una ventana\n"
+        "            // sin bordes no se ve y la tecla siguiente elegía una opción, como \"Minimizar\".\n"
+        "            if wparam & 0xfff0 == 0xf100 && unsafe { GetMenu(window) } == 0 {\n"
+        "                result = ProcResult::Value(0);\n"
+        "                return;\n"
+        "            }\n"
+        "            result = ProcResult::DefWindowProc(wparam);\n"
+        "        },\n"
+        "\n"
+        "        WM_MOUSEMOVE => {\n",
+        ("**/.fingerprint/winit-*", "**/build/winit-*", "**/deps/libwinit-*", "**/deps/winit-*"),
+    ),
+]
+
+
+def ajustar_teclado(carpeta):
+    """Aplica TECLADO a las copias descargadas y borra lo compilado de las que cambiaron."""
+    checkouts = cargo_home() / "git" / "checkouts"
+    for nombre, patron, viejo, nuevo, compilados in TECLADO:
+        cambiados = 0
+        vistos = 0
+        for archivo in checkouts.glob(patron):
+            texto = archivo.read_text(encoding="utf-8")
+            if nuevo in texto:
+                vistos += 1
+                continue
+            if texto.count(viejo) != 1:
+                continue
+            archivo.write_text(texto.replace(viejo, nuevo), encoding="utf-8", newline="")
+            cambiados += 1
+            vistos += 1
+        if not vistos:
+            print(f"AVISO: {nombre}: no se encontró el texto a ajustar; se compila sin el ajuste de teclado")
+            continue
+        borrados = recompilar(carpeta, compilados)
+        print(f"Bibliotecas: {nombre} ajustado ({cambiados} copias cambiadas, {borrados} archivos compilados borrados)")
+
+
 def main():
     carpeta = Path(sys.argv[1]).resolve()
     revs = revisiones_craft_update(carpeta)
+    subprocess.run(["cargo", "fetch", "--locked"], cwd=carpeta, check=True)
+    ajustar_teclado(carpeta)
     if not revs:
         print("Bibliotecas: el proyecto no usa craft-update")
         return
-    subprocess.run(["cargo", "fetch", "--locked"], cwd=carpeta, check=True)
     for rev in sorted(revs):
         archivos = list((cargo_home() / "git" / "checkouts").glob(f"craft-libs-*/{rev[:7]}/crates/update/src/self_update.rs"))
         if not archivos:

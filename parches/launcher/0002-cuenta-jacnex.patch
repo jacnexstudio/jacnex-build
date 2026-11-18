@@ -1,5 +1,5 @@
 diff --git a/apps/jacnex-studio/src/main.rs b/apps/jacnex-studio/src/main.rs
-index 9a6de40..02f45b6 100644
+index 9a6de40..137c61f 100644
 --- a/apps/jacnex-studio/src/main.rs
 +++ b/apps/jacnex-studio/src/main.rs
 @@ -663,9 +663,15 @@ struct DesktopHost {
@@ -37,6 +37,14 @@ index 9a6de40..02f45b6 100644
              starts,
              windowless,
              run_again,
+@@ -1024,6 +1040,7 @@ impl eframe::App for Shell<'_> {
+             }
+         }
+         craft_quit::on_close_request(ctx);
++        jacnex_studio_ui_egui::volver_si_se_minimiza_al_escribir(ctx);
+     }
+ 
+     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
 diff --git a/crates/core/src/cuenta.rs b/crates/core/src/cuenta.rs
 new file mode 100644
 index 0000000..44cfd6b
@@ -667,7 +675,7 @@ index cacef51..138458c 100644
  pub mod manifest;
  #[cfg(any(windows, test))]
 diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
-index 3fddd45..2df3142 100644
+index 3fddd45..4e58dc5 100644
 --- a/crates/ui-egui/src/app.rs
 +++ b/crates/ui-egui/src/app.rs
 @@ -68,6 +68,11 @@ pub trait Host {
@@ -682,8 +690,115 @@ index 3fddd45..2df3142 100644
      /// The URL to open when WhatsApp is clicked. Defaults to the web link.
      fn discord_url(&self) -> &'static str {
          jacnex_studio_core::catalog::DISCORD_URL
+@@ -140,6 +145,8 @@ impl Dialog {
+ 
+ pub struct LauncherUi {
+     pub(crate) backend: Box<dyn Backend>,
++    /// Jacnex: hay cuentas y nadie inició sesión; nada se instala hasta entonces.
++    pub(crate) sin_sesion: bool,
+     pub settings: Settings,
+     pub(crate) entries: Vec<AppEntry>,
+     pub(crate) caps: Capabilities,
+@@ -304,6 +311,7 @@ impl LauncherUi {
+             pending: Vec::new(),
+             frame: None,
+             flushed: Vec::new(),
++            sin_sesion: false,
+             pending_toasts: Vec::new(),
+             pin_dragging: None,
+         }
+@@ -355,9 +363,26 @@ impl LauncherUi {
+     }
+ 
+     pub(crate) fn send(&mut self, command: Command) {
++        if self.bloqueado_sin_sesion(&command) {
++            return;
++        }
+         self.backend.send(command);
+     }
+ 
++    /// Jacnex: installing an app needs a signed-in account. The launcher's own update doesn't.
++    fn bloqueado_sin_sesion(&self, command: &Command) -> bool {
++        let instala = matches!(command, Command::Install { .. } | Command::InstallAll { .. } | Command::Replace { .. });
++        if instala && self.sin_sesion {
++            log::info!("not installing without a signed-in account: {command:?}");
++        }
++        instala && self.sin_sesion
++    }
++
++    /// Jacnex: looks at the account; see `sin_sesion`.
++    fn mirar_sesion(&mut self, host: &mut dyn Host) {
++        self.sin_sesion = host.cuenta().is_some_and(|c| !matches!(c.estado(), jacnex_studio_core::cuenta::EstadoCuenta::Conectada(_)));
++    }
++
+     /// The toolbar's check button. The side effects run once, when the pass flushes.
+     pub(crate) fn check_now_from_ui(&mut self) {
+         self.act(UiAction::CheckNow);
+@@ -402,7 +427,11 @@ impl LauncherUi {
+                 continue;
+             }
+             match action {
+-                UiAction::Command(command) => self.backend.send(command.clone()),
++                UiAction::Command(command) => {
++                    if !self.bloqueado_sin_sesion(command) {
++                        self.backend.send(command.clone());
++                    }
++                }
+                 UiAction::Launch(id) => {
+                     let flags = self.settings.launch_flags.get(id).map_or("", String::as_str);
+                     // The dialog only saves flags that split, but the settings file can be edited by hand.
+@@ -510,6 +539,7 @@ impl LauncherUi {
+ 
+     /// Non-drawing work: runs every frame and also while the window is hidden in the tray.
+     pub fn logic(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
++        self.mirar_sesion(host);
+         // Messages made here (toasts, alerts) are drawn later, so use the language the UI can
+         // actually show: English where the system has no CJK face for the preference.
+         set_current(effective_lang(&self.settings.language));
+@@ -767,7 +797,7 @@ impl LauncherUi {
+         let to_update: Vec<(String, String)> = self
+             .entries
+             .iter()
+-            .filter(|e| self.in_filter(e, Filter::Updates) && e.job.is_none() && !e.ready)
++            .filter(|e| !self.sin_sesion && self.in_filter(e, Filter::Updates) && e.job.is_none() && !e.ready)
+             .filter_map(|e| {
+                 let v = e.latest_label()?;
+                 if self.auto_update_attempted.contains(&(e.app.id.to_string(), v.clone())) { None } else { Some((e.app.id.to_string(), v)) }
+@@ -825,6 +855,7 @@ impl LauncherUi {
+ 
+     /// Draws the launcher.
+     pub fn ui(&mut self, ui: &mut egui::Ui, host: &mut dyn Host) {
++        self.mirar_sesion(host);
+         let ctx = ui.ctx().clone();
+         self.begin_ui_frame(&ctx);
+         if host.title_bar() == TitleBar::MacOs && ctx.input_mut(|i| i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::M)) {
+@@ -1170,6 +1201,24 @@ mod tests {
+         assert_eq!(drawable_lang("fr", Some(Lang::ZH_CN)), Lang::FR);
+     }
+ 
++    /// Jacnex: without a signed-in account nothing is installed; the launcher's own update still goes.
++    #[test]
++    fn nothing_installs_without_a_signed_in_account() {
++        let (mut launcher, sent, _ctx) = launcher();
++        launcher.frame = Some(1);
++        launcher.sin_sesion = true;
++        launcher.act_command(Command::Install { app: "photocraft".into() });
++        launcher.act_command(Command::InstallAll { apps: vec!["photocraft".into()] });
++        launcher.act_command(Command::Replace { app: "photocraft".into(), path: "x".into() });
++        launcher.act_command(Command::UpdateLauncher);
++        launcher.flush_actions();
++        launcher.send(Command::Install { app: "filmcraft".into() });
++        assert_eq!(sent.borrow().as_slice(), &[Command::UpdateLauncher]);
++        launcher.sin_sesion = false;
++        launcher.send(Command::Install { app: "filmcraft".into() });
++        assert_eq!(installs(&sent), 1);
++    }
++
+     #[test]
+     /// Two controls queueing the same command in one pass are two gestures and must both reach the
+     /// backend.
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
-index e9bc8a2..5754f27 100644
+index e9bc8a2..b73b825 100644
 --- a/crates/ui-egui/src/jacnex.rs
 +++ b/crates/ui-egui/src/jacnex.rs
 @@ -8,6 +8,7 @@ use egui::{
@@ -786,6 +901,42 @@ index e9bc8a2..5754f27 100644
      }
  
      /// Apps with an update ready and nothing running.
+@@ -1429,3 +1461,35 @@ mod tests {
+         assert_eq!(url_forgenex("Café & sol\n", true), "https://jacnex.store/app?tipo=video&prompt=Caf%C3%A9%20%26%20sol");
+     }
+ }
++
++/// Windows can minimize the borderless window while an "@" is typed with Alt or AltGr (Latin
++/// American keyboards: AltGr+Q, Ctrl+Alt+Q, Alt+64). A window minimized a moment after a key went
++/// into a text field, with no click in between, comes straight back. Called from the app's
++/// `logic`, which runs while the window is minimized too.
++pub fn volver_si_se_minimiza_al_escribir(ctx: &egui::Context) {
++    const MARGEN: f64 = 2.0;
++    let id = egui::Id::unique("jx-ultima-tecla-en-campo");
++    let en_campo = ctx.memory(|m| m.focused()).is_some_and(|f| egui::TextEdit::load_state(ctx, f).is_some());
++    let (ahora, tecla, clic, minimizada) = ctx.input(|i| {
++        (
++            i.time,
++            i.events.iter().any(|e| matches!(e, egui::Event::Key { .. } | egui::Event::Text(_))),
++            i.pointer.any_pressed(),
++            i.viewport().minimized == Some(true),
++        )
++    });
++    if clic {
++        // The minimize button, or anything else clicked: a minimize after that is the user's.
++        ctx.data_mut(|d| d.remove::<f64>(id));
++    } else if tecla && en_campo && !minimizada {
++        ctx.data_mut(|d| d.insert_temp(id, ahora));
++        // A frame soon after, to catch a minimize those keys caused.
++        ctx.request_repaint_after(std::time::Duration::from_millis(200));
++    }
++    if minimizada && ctx.data(|d| d.get_temp::<f64>(id)).is_some_and(|t| ahora - t < MARGEN) {
++        ctx.data_mut(|d| d.remove::<f64>(id));
++        log::info!("the window minimized while typing in a field; restoring it");
++        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
++        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
++    }
++}
 diff --git a/crates/ui-egui/src/jacnex/acceso.rs b/crates/ui-egui/src/jacnex/acceso.rs
 new file mode 100644
 index 0000000..ace5d16
@@ -1187,6 +1338,18 @@ index 0000000..ace5d16
 +        assert_eq!(creditos(3200), "3,200 créditos");
 +    }
 +}
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 29d67bf..96a4d77 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -40,6 +40,7 @@ mod views;
+ mod widgets;
+ 
+ pub use app::{Host, LauncherUi, TitleBar};
++pub use jacnex::volver_si_se_minimiza_al_escribir;
+ pub use i18n::{
+     Lang, LangInfo, current, detect_system_lang_in_background, fmt, has, lang_from_tag, message, msg, set_current, set_system_locales, system_lang,
+     t, t_id, tn, tr, tr_ctx, tr_id, trn,
 diff --git a/crates/ui-egui/tests/jacnex_capturas.rs b/crates/ui-egui/tests/jacnex_capturas.rs
 index eb59f8e..c77b668 100644
 --- a/crates/ui-egui/tests/jacnex_capturas.rs
@@ -1319,4 +1482,74 @@ index eb59f8e..c77b668 100644
 +        assert_eq!(harness.query_by_label("Photonex").is_some(), ve_apps, "{estado:?}");
 +        assert_eq!(harness.query_by_label("Iniciar sesión").is_some(), !ve_apps, "{estado:?}");
 +    }
++}
+diff --git a/crates/ui-egui/tests/jx_minimizar.rs b/crates/ui-egui/tests/jx_minimizar.rs
+new file mode 100644
+index 0000000..d4a3b83
+--- /dev/null
++++ b/crates/ui-egui/tests/jx_minimizar.rs
+@@ -0,0 +1,64 @@
++//! Jacnex: a window that minimizes while an "@" is typed into a field comes back by itself.
++
++use egui_kittest::Harness;
++use egui_kittest::kittest::Queryable as _;
++
++fn pedidos(h: &Harness<'_>) -> Vec<egui::ViewportCommand> {
++    h.output().viewport_output.values().flat_map(|v| v.commands.iter().cloned()).collect()
++}
++
++fn ventana(texto: &mut String) -> impl FnMut(&mut egui::Ui) + '_ {
++    move |ui| {
++        jacnex_studio_ui_egui::volver_si_se_minimiza_al_escribir(ui.ctx());
++        ui.label("Correo");
++        ui.add(egui::TextEdit::singleline(texto).id(egui::Id::unique("campo")).hint_text("Correo"));
++    }
++}
++
++fn minimizar(h: &mut Harness<'_>, si: bool) {
++    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().minimized = Some(si);
++}
++
++#[test]
++fn a_minimize_right_after_typing_in_a_field_is_undone() {
++    let mut texto = String::new();
++    let mut h = Harness::new_ui(ventana(&mut texto));
++    h.run();
++    h.get_all_by_role(egui::accesskit::Role::TextInput).next().expect("field").click();
++    h.run();
++    h.input_mut().events.push(egui::Event::Text("@".into()));
++    h.step();
++    minimizar(&mut h, true);
++    h.step();
++    let p = pedidos(&h);
++    assert!(p.contains(&egui::ViewportCommand::Minimized(false)), "{p:?}");
++    assert!(p.contains(&egui::ViewportCommand::Focus), "{p:?}");
++}
++
++#[test]
++fn a_minimize_after_a_click_or_without_typing_stays() {
++    let mut texto = String::new();
++    let mut h = Harness::new_ui(ventana(&mut texto));
++    h.run();
++    // Never typed: a minimize is the user's.
++    minimizar(&mut h, true);
++    h.step();
++    assert!(!pedidos(&h).contains(&egui::ViewportCommand::Minimized(false)));
++    minimizar(&mut h, false);
++    h.run();
++    // Typed, then clicked (the minimize button, say).
++    h.get_all_by_role(egui::accesskit::Role::TextInput).next().expect("field").click();
++    h.run();
++    h.input_mut().events.push(egui::Event::Text("a".into()));
++    h.step();
++    h.input_mut().events.push(egui::Event::PointerButton {
++        pos: egui::pos2(300.0, 300.0),
++        button: egui::PointerButton::Primary,
++        pressed: true,
++        modifiers: egui::Modifiers::NONE,
++    });
++    h.step();
++    minimizar(&mut h, true);
++    h.step();
++    assert!(!pedidos(&h).contains(&egui::ViewportCommand::Minimized(false)));
 +}
