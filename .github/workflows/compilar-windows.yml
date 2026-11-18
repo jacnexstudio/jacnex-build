@@ -119,6 +119,23 @@ jobs:
           DIST: ${{ github.workspace }}/dist
         run: pwsh packaging/windows/package.ps1 -Arch x64
 
+      # Guarda: Jacnex Studio 0.19.2 salió con la comprobación de firma de ArtCraft ("isn't signed
+      # ... doesn't install updates") porque la caché trajo craft-update compilado sin el ajuste de
+      # bibliotecas.py, y quien lo instaló no podía actualizarse. Nunca se publica un programa así.
+      - name: Comprobar el ajuste de craft-update
+        shell: pwsh
+        working-directory: src/target/x86_64-pc-windows-msvc/release
+        run: |
+          $exes = @(Get-ChildItem -File -Filter *.exe)
+          if (-not $exes) { throw 'No hay ningún .exe compilado' }
+          foreach ($exe in $exes) {
+            $texto = [IO.File]::ReadAllText($exe.FullName, [Text.Encoding]::GetEncoding(28591))
+            if ($texto.Contains("so it doesn't install updates")) {
+              throw "$($exe.Name) tiene craft-update sin ajustar: no se actualizaría sin firma digital"
+            }
+            Write-Output "$($exe.Name): craft-update ajustado"
+          }
+
       # Jacnex Studio instala las apps desde su zip portable y busca el .exe en la raíz del zip;
       # package.ps1 lo empaqueta dentro de una carpeta, así que se vuelve a armar sin ella.
       - name: Zip portable con el programa en la raíz

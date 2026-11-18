@@ -81,16 +81,31 @@ def ajustar(archivo):
     return True
 
 
+COMPILADOS = (
+    "**/.fingerprint/craft-update-*",
+    "**/build/craft-update-*",
+    "**/deps/libcraft_update-*",
+    "**/deps/craft_update-*",
+)
+
+
 def recompilar(carpeta):
     """Cargo no revisa si cambió una dependencia git (la reconoce por su revisión) y la caché de Rust
-    puede traerla ya compilada: se borran sus huellas para que se compile con el ajuste."""
+    puede traerla ya compilada: se borra lo compilado de craft-update (huellas y bibliotecas) para
+    que se compile con el ajuste. Borrar solo las huellas no bastó: Jacnex Studio 0.19.2 salió con
+    la comprobación de firma de antes porque la caché trajo craft-update compilado y no se borró
+    nada. Por eso, además, compilar-windows.yml revisa el programa después de compilar."""
     destino = Path(os.environ.get("CARGO_TARGET_DIR") or carpeta / "target")
     if not destino.is_dir():
         return 0
     borradas = 0
-    for huella in destino.glob("**/.fingerprint/craft-update-*"):
-        shutil.rmtree(huella, ignore_errors=True)
-        borradas += 1
+    for patron in COMPILADOS:
+        for ruta in destino.glob(patron):
+            if ruta.is_dir():
+                shutil.rmtree(ruta, ignore_errors=True)
+            else:
+                ruta.unlink(missing_ok=True)
+            borradas += 1
     return borradas
 
 
@@ -107,7 +122,7 @@ def main():
             raise ErrorDeAjuste(f"no se encontró craft-update {rev[:7]} en {cargo_home()}")
         for archivo in archivos:
             print(f"Bibliotecas: craft-update {rev[:7]} {'ajustado' if ajustar(archivo) else 'ya estaba ajustado'}")
-    print(f"Bibliotecas: {recompilar(carpeta)} huellas de compilación de craft-update borradas")
+    print(f"Bibliotecas: {recompilar(carpeta)} archivos compilados de craft-update borrados")
 
 
 if __name__ == "__main__":
