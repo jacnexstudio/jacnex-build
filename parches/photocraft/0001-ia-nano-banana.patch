@@ -12,10 +12,10 @@ index 860de3aae..d0cac4e2f 100644
  ]
 diff --git a/crates/engine/src/jacnex_ia.rs b/crates/engine/src/jacnex_ia.rs
 new file mode 100644
-index 000000000..e3071c8fb
+index 000000000..2e04308d8
 --- /dev/null
 +++ b/crates/engine/src/jacnex_ia.rs
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,242 @@
 +//! Jacnex: what Photonex's built-in AI (`photocraft-ui-egui`'s `jacnex_ia`) needs from the
 +//! document: the area it works on, that area's pixels as the person sees them, and the result
 +//! placed back as a new layer (masked by the selection, one undo step).
@@ -53,16 +53,14 @@ index 000000000..e3071c8fb
 +    if bounds.is_empty() {
 +        return None;
 +    }
++    Some(Zone { context: context_rect(bounds, canvas, margin), selected: Some(bounds), selection: Some(sel.clone()) })
++}
++
++/// `bounds` grown by `margin` of its size on each side, inside `canvas` (see [`zone`]).
++pub fn context_rect(bounds: Rect, canvas: Rect, margin: f32) -> Rect {
 +    let pad = |len: u32| ((len as f32 * margin.clamp(0.0, 2.0)).round() as i32).max(0);
 +    let (px, py) = (pad(bounds.width()), pad(bounds.height()));
-+    let context = Rect::new(
-+        bounds.x0.saturating_sub(px),
-+        bounds.y0.saturating_sub(py),
-+        bounds.x1.saturating_add(px),
-+        bounds.y1.saturating_add(py),
-+    )
-+    .intersect(&canvas);
-+    Some(Zone { context, selected: Some(bounds), selection: Some(sel.clone()) })
++    Rect::new(bounds.x0.saturating_sub(px), bounds.y0.saturating_sub(py), bounds.x1.saturating_add(px), bounds.y1.saturating_add(py)).intersect(&canvas)
 +}
 +
 +/// The visible composite (what the canvas shows, without the checkerboard) in `r`, as RGBA8.
@@ -85,6 +83,48 @@ index 000000000..e3071c8fb
 +/// `name` above the active one, masked by `mask` (a selection) when given. One history step
 +/// labelled `label`; the selection stays, as after Generative Fill in the reference application.
 +pub fn place(s: &mut Session, label: &str, name: &str, r: Rect, rgba: &[u8], mask: Option<&Surface>) -> Result<LayerId> {
++    let (surface, mask, fmt) = prepare(s, r, rgba, mask)?;
++    s.edit(label, |doc, active| {
++        let mut layer = Layer::raster(name, fmt);
++        *crate::pixels_mut(&mut layer)? = surface;
++        layer.mask = mask;
++        let id = crate::layer_place::insert_new(doc, *active, layer, crate::layer_place::Place::AutoEditable);
++        *active = Some(id);
++        Ok(id)
++    })
++}
++
++/// The largest side [`open_as_document`] accepts (Upscale ×4 of a 2048 px image).
++pub const MAX_SIDE: u32 = 16_384;
++
++/// A GRAY8 mask covering `r` from one byte a pixel (255 = shown), for [`place`]. `None` when the
++/// sizes do not match.
++pub fn mask_from_gray(r: Rect, gray: &[u8]) -> Option<Surface> {
++    (!r.is_empty() && gray.len() == r.width() as usize * r.height() as usize).then(|| Surface::from_interleaved(PixelFormat::GRAY8, r, gray))
++}
++
++/// [`place`] for a cutout (Remove Background): the new layer is masked by `mask` and every other
++/// top-level layer is hidden in the same step, so the subject shows on transparency. The hidden
++/// layers stay in the document; showing them again (or Ctrl+Z) brings the background back.
++pub fn place_alone(s: &mut Session, label: &str, name: &str, r: Rect, rgba: &[u8], mask: &Surface) -> Result<LayerId> {
++    let (surface, mask, fmt) = prepare(s, r, rgba, Some(mask))?;
++    s.edit(label, |doc, active| {
++        let mut layer = Layer::raster(name, fmt);
++        *crate::pixels_mut(&mut layer)? = surface;
++        layer.mask = mask;
++        let id = layer.id;
++        for l in doc.layers.iter_mut() {
++            l.visible = false;
++        }
++        // At the top of the stack, outside any group: it is the only thing left to see.
++        let index = doc.layers.len();
++        doc.layers.insert(index, layer);
++        *active = Some(id);
++        Ok(id)
++    })
++}
++
++fn prepare(s: &Session, r: Rect, rgba: &[u8], mask: Option<&Surface>) -> Result<(Surface, Option<LayerMask>, PixelFormat)> {
 +    if r.is_empty() || rgba.len() != r.width() as usize * r.height() as usize * 4 {
 +        return Err(EngineError::Other("the generated image does not match its area".into()));
 +    }
@@ -97,14 +137,42 @@ index 000000000..e3071c8fb
 +    }
 +    surface.prune();
 +    let mask = mask.map(|m| crate::commands::mask_at_depth(LayerMask { surface: m.clone(), ..LayerMask::reveal_all() }, d.doc.depth)).transpose()?;
++    Ok((surface, mask, target))
++}
++
++/// Replaces the pixels of layer `id` in the active document with `rgba` covering `r` (switching
++/// between the variations of one generation). One history step labelled `label`.
++pub fn replace_pixels(s: &mut Session, label: &str, id: LayerId, r: Rect, rgba: &[u8]) -> Result<()> {
++    let (surface, _, _) = prepare(s, r, rgba, None)?;
++    if s.active().and_then(|d| d.doc.layer(id)).is_none() {
++        return Err(EngineError::Other("the AI layer is no longer in the document".into()));
++    }
 +    s.edit(label, |doc, active| {
-+        let mut layer = Layer::raster(name, target);
-+        *crate::pixels_mut(&mut layer)? = surface;
-+        layer.mask = mask;
-+        let id = crate::layer_place::insert_new(doc, *active, layer, crate::layer_place::Place::AutoEditable);
++        let layer = doc.layer_mut(id).ok_or_else(|| EngineError::Other("the AI layer is no longer in the document".into()))?;
++        *crate::pixels_mut(layer)? = surface;
 +        *active = Some(id);
-+        Ok(id)
++        Ok(())
 +    })
++}
++
++/// Opens `rgba` (`width`×`height`, RGBA8) as a new RGB 8-bit document named `name` with one
++/// layer, and makes it active. Returns its index.
++pub fn open_as_document(s: &mut Session, name: &str, width: u32, height: u32, rgba: &[u8]) -> Result<usize> {
++    if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE || rgba.len() != width as usize * height as usize * 4 {
++        return Err(EngineError::Other("the image does not have a usable size".into()));
++    }
++    let mut doc = Document::new(name, photocraft_geom::Size::new(width, height), photocraft_color::ColorMode::Rgb, photocraft_color::SampleType::U8);
++    let mut layer = Layer::raster("Imagen", PixelFormat::RGBA8);
++    let mut surface = Surface::from_interleaved(PixelFormat::RGBA8, Rect::new(0, 0, width as i32, height as i32), rgba);
++    surface.prune();
++    *crate::pixels_mut(&mut layer)? = surface;
++    let id = layer.id;
++    doc.layers.push(layer);
++    let i = s.add_document(doc, None);
++    if let Some(d) = s.active_mut() {
++        d.active_layer = Some(id);
++    }
++    Ok(i)
 +}
 +
 +#[cfg(test)]
@@ -150,6 +218,44 @@ index 000000000..e3071c8fb
 +    fn a_wrong_size_is_an_error_not_a_panic() {
 +        let mut s = session();
 +        assert!(place(&mut s, "x", "x", Rect::new(0, 0, 4, 4), &[0; 10], None).is_err());
++    }
++
++    #[test]
++    fn a_cutout_hides_the_rest_and_variations_swap_in_one_step() {
++        let mut s = session();
++        let r = Rect::new(0, 0, 64, 48);
++        let px = [10u8, 20, 30, 255].repeat(64 * 48);
++        let mut gray = vec![0u8; 64 * 48];
++        gray[..64 * 24].fill(255);
++        let mask = mask_from_gray(r, &gray).unwrap();
++        assert!(mask_from_gray(r, &[0; 3]).is_none());
++        let id = place_alone(&mut s, "Remove Background", "IA", r, &px, &mask).unwrap();
++        let d = s.active().unwrap();
++        assert!(d.doc.layers.iter().filter(|l| l.id != id).all(|l| !l.visible));
++        assert_eq!(d.doc.layers.last().unwrap().id, id);
++        let shown = composite_rgba8(&d.doc, r);
++        assert_eq!(shown[10 * 64 + 5], [10, 20, 30, 255], "the kept half");
++        assert_eq!(shown[40 * 64 + 5][3], 0, "the removed half is transparent");
++
++        replace_pixels(&mut s, "Variation", id, r, &[90u8, 90, 90, 255].repeat(64 * 48)).unwrap();
++        assert_eq!(composite_rgba8(&s.active().unwrap().doc, r)[10 * 64 + 5], [90, 90, 90, 255]);
++        s.execute("edit.undo", json!({})).unwrap();
++        assert_eq!(composite_rgba8(&s.active().unwrap().doc, r)[10 * 64 + 5], [10, 20, 30, 255]);
++        assert!(replace_pixels(&mut s, "x", id, r, &[0; 7]).is_err());
++    }
++
++    #[test]
++    fn an_upscaled_result_opens_as_its_own_document() {
++        let mut s = session();
++        let i = open_as_document(&mut s, "Foto x2", 8, 6, &[1u8, 2, 3, 255].repeat(48)).unwrap();
++        assert_eq!(s.documents().len(), 2);
++        let d = s.active().unwrap();
++        assert_eq!(s.documents()[i].doc.id, d.doc.id);
++        assert_eq!((d.doc.size.width, d.doc.size.height), (8, 6));
++        assert_eq!(composite_rgba8(&d.doc, Rect::new(7, 5, 8, 6))[0], [1, 2, 3, 255]);
++        assert!(d.active_layer.is_some());
++        assert!(open_as_document(&mut s, "x", 0, 6, &[]).is_err());
++        assert!(open_as_document(&mut s, "x", 2, 2, &[0; 4]).is_err());
 +    }
 +}
 diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
@@ -230,31 +336,39 @@ index 49053405f..83e830587 100644
          {
 diff --git a/crates/ui-egui/src/jacnex_ia.rs b/crates/ui-egui/src/jacnex_ia.rs
 new file mode 100644
-index 000000000..4446e574e
+index 000000000..3b43541e4
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_ia.rs
-@@ -0,0 +1,878 @@
-+//! Jacnex: la IA integrada de Photonex (piloto con Google Nano Banana).
+@@ -0,0 +1,2139 @@
++//! Jacnex: la IA integrada de Photonex.
 +//!
-+//! Funciona como el Relleno generativo de la aplicación de referencia, pero explicado paso a paso:
++//! Ocho herramientas, explicadas paso a paso en la ventana «IA de Jacnex» (Edición › Relleno
++//! generativo (IA)…) y, las de selección, también en la barra contextual bajo la selección:
 +//!
-+//! - **Con una selección**: se envía la zona seleccionada (más un margen alrededor, para que la
-+//!   IA respete luz y perspectiva) y una máscara; el resultado vuelve como una **capa nueva**
-+//!   recortada por la selección, justo encima de la capa activa. Ctrl+Z la quita.
-+//! - **Sin selección**: o se edita la imagen entera, o se crea una imagen nueva que ocupa el
-+//!   lienzo; también como capa nueva.
++//! - **Relleno generativo**: la zona seleccionada (más un margen alrededor, para que la IA respete
++//!   luz y perspectiva) y su máscara van al modelo elegido; el resultado vuelve como una **capa
++//!   nueva** recortada por la selección. Sin selección edita la imagen entera o crea una nueva.
++//! - **Quitar objeto**: lo mismo, con instrucciones para borrar lo seleccionado (y su sombra).
++//! - **Expandir imagen**: agranda el lienzo a una proporción y la IA dibuja lo que falta.
++//! - **Quitar fondo** (Recraft): capa nueva con máscara del sujeto; el resto se oculta.
++//! - **Generar fondo**: separa al sujeto y la IA crea un fondo nuevo detrás.
++//! - **Mejorar resolución** (Topaz): ×2 o ×4, en un documento nuevo.
++//! - **Texto con IA**: texto bien escrito dentro de la imagen (GPT Image 2 por defecto).
++//! - **Retoques en un clic**: luz y color, restaurar, colorear, producto, retrato, cielo…
 +//!
-+//! Se abre desde Edición › Relleno generativo (IA)… o desde la barra contextual que aparece bajo
-+//! la selección (como la barra de tareas contextual de Recortar). La red va en un hilo aparte:
-+//! la interfaz nunca se congela. El servidor es app.jacnex.store (`/v1/jacnex/*`), con la llave de
-+//! la sesión iniciada en Jacnex Studio. Los créditos se descuentan en el servidor, que los devuelve
-+//! si la generación falla.
++//! Con varias **variaciones** se cobra cada una; se cambia entre ellas sin volver a pagar. Una
++//! **imagen de referencia** (otro documento abierto) guía el aspecto de lo que se añade. Todo
++//! resultado es una capa nueva (Ctrl+Z lo quita) y «Aplicar a la imagen» la combina con la de abajo.
++//!
++//! La red va en un hilo aparte: la interfaz nunca se congela. El servidor es app.jacnex.store
++//! (`/v1/jacnex/*`), con la llave de la sesión iniciada en Jacnex Studio. Los créditos se
++//! descuentan en el servidor, que los devuelve si una generación falla.
 +
-+use std::sync::mpsc::{Receiver, TryRecvError};
++use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 +use std::time::{Duration, Instant};
 +
 +use egui::{Color32, RichText};
-+use photocraft_doc::DocId;
++use photocraft_doc::{DocId, LayerId};
 +use photocraft_engine::jacnex_ia as motor;
 +use photocraft_geom::Rect;
 +use photocraft_raster::Surface;
@@ -263,19 +377,157 @@ index 000000000..4446e574e
 +use crate::canvas::ViewXform;
 +use crate::widgets::task_bar;
 +
-+/// El modelo del piloto.
++/// El modelo por defecto: el más económico.
 +pub const MODELO: &str = "nano-banana";
-+const MODELO_NOMBRE: &str = "Google Nano Banana";
-+/// El lado largo de lo que se envía: más no mejora el resultado y tarda más en subir.
++/// El de Texto con IA: el que mejor escribe dentro de la imagen.
++const MODELO_TEXTO: &str = "gpt-image-2";
++/// El lado largo de lo que se envía a los modelos de imagen: más no mejora el resultado y tarda
++/// más en subir.
 +const MAX_LADO: u32 = 1536;
++/// El de la imagen de referencia.
++const MAX_LADO_REFERENCIA: u32 = 1024;
++/// Quitar fondo (Recraft): entre 256 y 4096 px, hasta 5 MB; 2048 basta para un recorte limpio.
++const MAX_LADO_RECORTE: u32 = 2048;
++const MIN_LADO_RECORTE: u32 = 256;
++/// Mejorar resolución: el resultado no pasa de este lado.
++const MAX_LADO_AMPLIADO: u32 = 8192;
++/// Mejorar resolución (Topaz): lo que se sube no pasa de 10 MB.
++const MAX_BYTES_AMPLIAR: u64 = 9 * 1024 * 1024;
++/// Más píxeles que esto no se procesan (memoria): unos 80 MP.
++const MAX_PIXELES: u64 = 80_000_000;
 +/// El contexto alrededor de la selección, como fracción de su tamaño.
 +const MARGEN: f32 = 0.15;
++/// El fondo con que se aplanan las zonas transparentes o fuera del lienzo al enviarlas.
++const GRIS: [u8; 3] = [128, 128, 128];
 +
 +/// Ideas de un clic para quien no sabe qué escribir.
-+const IDEAS_SELECCION: &[&str] = &["un cielo al atardecer", "flores de colores", "quitar el objeto", "un sombrero elegante", "agua cristalina"];
-+const IDEAS_LIENZO: &[&str] = &["estilo acuarela", "de noche con luces de neón", "foto de producto con fondo de estudio", "estilo ilustración 3D"];
++const IDEAS_SELECCION: &[&str] = &["un cielo al atardecer", "flores de colores", "un sombrero elegante", "agua cristalina", "una planta en maceta"];
++const IDEAS_LIENZO: &[&str] = &["estilo acuarela", "de noche con luces de neón", "estilo ilustración 3D", "en una playa al atardecer"];
++const IDEAS_FONDO: &[&str] = &["estudio blanco con sombra suave", "playa al atardecer", "oficina moderna", "mármol y plantas", "degradado pastel"];
++const IDEAS_EXPANDIR: &[&str] = &["más cielo", "continúa el paisaje", "una calle de ciudad"];
 +
-+/// Qué hacer cuando no hay selección.
++/// Retoques en un clic: (nombre, instrucción para el modelo).
++const RETOQUES: &[(&str, &str)] = &[
++    (
++        "Mejorar luz y color",
++        "Improve the lighting, exposure, white balance, contrast and colors like a professional photo retoucher. Keep every person, object, text and the framing exactly the same.",
++    ),
++    (
++        "Restaurar foto antigua",
++        "Restore this old photo: remove scratches, dust, stains, tears and noise, fix faded colors and gently sharpen faces. Keep it faithful to the original people and scene.",
++    ),
++    (
++        "Colorear blanco y negro",
++        "Colorize this black and white photo with natural, realistic, period-appropriate colors. Keep every detail and the framing exactly the same.",
++    ),
++    (
++        "Foto de producto de estudio",
++        "Turn this into a professional e-commerce product photo: clean light studio background, soft natural shadow, crisp details. Keep the product exactly the same, including its shape, label and any text.",
++    ),
++    (
++        "Retrato profesional",
++        "Make this a professional portrait: flattering soft studio lighting, clean softly blurred background, natural skin texture. Keep the person's identity, face, expression and clothing exactly the same.",
++    ),
++    (
++        "Cielo espectacular",
++        "Replace only the sky with a dramatic, beautiful sky that matches the scene's lighting and time of day. Keep everything else exactly the same.",
++    ),
++    ("Quitar gente del fondo", "Remove the people and distractions in the background and fill naturally. Keep the main subject exactly the same."),
++    (
++        "Nitidez y detalle",
++        "Make this photo sharper and clearer: recover fine detail, reduce noise and blur, without changing anything in the content or colors.",
++    ),
++];
++
++/// Los modelos de imagen conocidos, para mostrarlos antes de que responda el servidor (que manda
++/// sus precios): (id, nombre, proporciones, descripción).
++const MODELOS_BASE: &[(&str, &str, &str, &str)] = &[
++    ("nano-banana", "Google Nano Banana", GEMINI, "El más económico de Google. Bueno para probar ideas."),
++    ("nano-banana-2", "Google Nano Banana 2", GEMINI, "Rápido y muy bueno para el día a día. Ideal para fotos de producto."),
++    ("nano-banana-pro", "Google Nano Banana Pro", GEMINI, "La mejor calidad de Google: detalle nítido y ediciones fieles a tu foto."),
++    ("gpt-image-2", "OpenAI GPT Image 2", "1:1 4:3 3:4 3:2 2:3 16:9 9:16", "Sigue tus indicaciones al pie de la letra, incluido el texto dentro de la imagen."),
++    ("seedream-5-flash", "ByteDance Seedream 5.0 Flash", "1:1 4:3 3:4 3:2 2:3 16:9 9:16 21:9", "Imágenes 2K a muy buen precio."),
++    ("flux-2-pro", "Black Forest Labs FLUX.2 Pro", "1:1 4:3 3:4 3:2 2:3 16:9 9:16", "Fotorrealismo y estilos artísticos con mucho control."),
++];
++const GEMINI: &str = "1:1 4:5 3:4 2:3 9:16 4:3 3:2 16:9 21:9";
++
++/// Las herramientas.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
++pub enum Herramienta {
++    #[default]
++    Relleno,
++    QuitarObjeto,
++    Expandir,
++    QuitarFondo,
++    GenerarFondo,
++    MejorarResolucion,
++    Texto,
++    Retoque,
++}
++
++impl Herramienta {
++    pub const TODAS: [Herramienta; 8] = [
++        Herramienta::Relleno,
++        Herramienta::QuitarObjeto,
++        Herramienta::Expandir,
++        Herramienta::QuitarFondo,
++        Herramienta::GenerarFondo,
++        Herramienta::MejorarResolucion,
++        Herramienta::Texto,
++        Herramienta::Retoque,
++    ];
++
++    pub fn nombre(self) -> &'static str {
++        match self {
++            Herramienta::Relleno => "Relleno generativo",
++            Herramienta::QuitarObjeto => "Quitar objeto",
++            Herramienta::Expandir => "Expandir imagen",
++            Herramienta::QuitarFondo => "Quitar fondo",
++            Herramienta::GenerarFondo => "Generar fondo",
++            Herramienta::MejorarResolucion => "Mejorar resolución",
++            Herramienta::Texto => "Texto con IA",
++            Herramienta::Retoque => "Retoques en un clic",
++        }
++    }
++
++    fn ayuda(self) -> &'static str {
++        match self {
++            Herramienta::Relleno => "Añade o cambia lo que quieras dentro de una selección. Sin selección, edita o crea la imagen entera.",
++            Herramienta::QuitarObjeto => "Borra lo seleccionado (personas, cables, manchas…) y rellena con lo que habría detrás.",
++            Herramienta::Expandir => "Agranda el lienzo a otra proporción y la IA dibuja lo que falta alrededor.",
++            Herramienta::QuitarFondo => "Separa a la persona u objeto principal del fondo, en un clic.",
++            Herramienta::GenerarFondo => "Deja al sujeto intacto y crea un fondo nuevo detrás, con luz que encaja.",
++            Herramienta::MejorarResolucion => "Agranda la foto 2 o 4 veces recuperando detalle. Se abre como documento nuevo.",
++            Herramienta::Texto => "Escribe un texto dentro de la imagen, bien escrito y con el estilo que pidas.",
++            Herramienta::Retoque => "Mejora la foto entera en un clic: luz y color, restaurar, colorear, producto, retrato…",
++        }
++    }
++
++    /// Usa un modelo de imagen elegible (las otras usan una herramienta fija).
++    fn usa_modelo(self) -> bool {
++        !matches!(self, Herramienta::QuitarFondo | Herramienta::MejorarResolucion)
++    }
++
++    fn admite_variaciones(self) -> bool {
++        self.usa_modelo()
++    }
++
++    /// Necesita una selección.
++    fn pide_seleccion(self) -> bool {
++        self == Herramienta::QuitarObjeto
++    }
++
++    /// Usa la selección si la hay (las demás trabajan con la imagen entera).
++    fn usa_seleccion(self) -> bool {
++        matches!(self, Herramienta::Relleno | Herramienta::QuitarObjeto | Herramienta::Texto)
++    }
++
++    fn admite_referencia(self) -> bool {
++        matches!(self, Herramienta::Relleno | Herramienta::GenerarFondo | Herramienta::Expandir)
++    }
++}
++
++/// Qué hacer cuando no hay selección (Relleno generativo).
 +#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 +pub enum SinSeleccion {
 +    /// Cambiar la imagen entera según la indicación.
@@ -285,33 +537,176 @@ index 000000000..4446e574e
 +    CrearNueva,
 +}
 +
-+/// La cuenta y el saldo, según el servidor.
++/// La proporción de Expandir imagen.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
++pub enum Proporcion {
++    #[default]
++    Mas25,
++    Cuadrado,
++    Vertical,
++    Historia,
++    Horizontal,
++}
++
++impl Proporcion {
++    const TODAS: [Proporcion; 5] = [Proporcion::Mas25, Proporcion::Cuadrado, Proporcion::Vertical, Proporcion::Historia, Proporcion::Horizontal];
++
++    fn nombre(self) -> &'static str {
++        match self {
++            Proporcion::Mas25 => "+25 % alrededor",
++            Proporcion::Cuadrado => "Cuadrado 1:1",
++            Proporcion::Vertical => "Vertical 4:5",
++            Proporcion::Historia => "Historia 9:16",
++            Proporcion::Horizontal => "Horizontal 16:9",
++        }
++    }
++
++    fn razon(self) -> Option<f64> {
++        match self {
++            Proporcion::Mas25 => None,
++            Proporcion::Cuadrado => Some(1.0),
++            Proporcion::Vertical => Some(4.0 / 5.0),
++            Proporcion::Historia => Some(9.0 / 16.0),
++            Proporcion::Horizontal => Some(16.0 / 9.0),
++        }
++    }
++}
++
++/// El tamaño del lienzo expandido (que contiene al actual), o `None` si ya tiene esa proporción.
++fn lienzo_expandido(w: u32, h: u32, p: Proporcion) -> Option<(u32, u32)> {
++    let (wf, hf) = (f64::from(w.max(1)), f64::from(h.max(1)));
++    let (nw, nh) = match p.razon() {
++        None => ((wf * 1.25).round(), (hf * 1.25).round()),
++        Some(r) if wf / hf < r => ((hf * r).round(), hf),
++        Some(r) => (wf, (wf / r).round()),
++    };
++    let (nw, nh) = (nw.clamp(1.0, f64::from(motor::MAX_SIDE)) as u32, nh.clamp(1.0, f64::from(motor::MAX_SIDE)) as u32);
++    // Menos de un 2 % más: ya tiene esa proporción.
++    (u64::from(nw) * u64::from(nh) * 50 > u64::from(w) * u64::from(h) * 51).then_some((nw, nh))
++}
++
++/// Un modelo o herramienta del servidor, con sus créditos por opción.
++#[derive(Clone, Debug)]
++struct ModeloInfo {
++    id: String,
++    nombre: String,
++    descripcion: String,
++    herramienta: bool,
++    aspectos: Vec<(u32, u32)>,
++    /// Créditos por opción: `1k`/`2k`/`4k`, `x2`/`x4` o `unica`.
++    creditos: Vec<(String, i64)>,
++}
++
++impl ModeloInfo {
++    /// Los créditos de una imagen de lado largo `lado` (o de la opción `clave`).
++    fn costo(&self, clave: &str) -> Option<i64> {
++        let por = |k: &str| self.creditos.iter().find(|(c, _)| c == k).map(|(_, v)| *v);
++        por(clave).or_else(|| por("unica")).or_else(|| (clave == "1k").then(|| self.creditos.first().map(|c| c.1)).flatten())
++    }
++
++    fn tiene_resoluciones(&self) -> bool {
++        self.creditos.iter().any(|(c, _)| c == "1k")
++    }
++}
++
++/// `"16:9"` → (16, 9).
++fn aspecto(s: &str) -> Option<(u32, u32)> {
++    let (a, b) = s.split_once(':')?;
++    let (a, b) = (a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?);
++    (a > 0 && b > 0).then_some((a, b))
++}
++
++fn modelos_base() -> Vec<ModeloInfo> {
++    MODELOS_BASE
++        .iter()
++        .map(|(id, nombre, aspectos, desc)| ModeloInfo {
++            id: (*id).into(),
++            nombre: (*nombre).into(),
++            descripcion: (*desc).into(),
++            herramienta: false,
++            aspectos: aspectos.split_whitespace().filter_map(aspecto).collect(),
++            creditos: Vec::new(),
++        })
++        .collect()
++}
++
++/// La resolución que el servidor cobra para un envío de lado largo `lado`.
++fn nivel(lado: u32) -> &'static str {
++    if lado <= 1200 {
++        "1k"
++    } else if lado <= 2400 {
++        "2k"
++    } else {
++        "4k"
++    }
++}
++
++/// La cuenta y el catálogo, según el servidor.
 +#[derive(Clone, Debug)]
 +struct Info {
 +    nombre: String,
 +    creditos: i64,
-+    costo: i64,
-+    costo_edicion: i64,
++    modelos: Vec<ModeloInfo>,
++}
++
++struct Img {
++    rgba: Vec<u8>,
++    ancho: u32,
++    alto: u32,
++}
++
++/// Lo que devolvió una generación.
++struct Resultados {
++    imagenes: Vec<Img>,
++    /// El recorte de Recraft (Generar fondo): su alfa es el sujeto.
++    alfa: Option<Img>,
++    /// Variaciones que fallaron (sus créditos se devuelven).
++    fallidas: usize,
 +}
 +
 +/// Lo que el hilo de red le cuenta a la interfaz.
 +enum Evento {
 +    Etapa(&'static str),
 +    Cobrado { saldo: Option<i64> },
-+    Listo { rgba: Vec<u8>, ancho: u32, alto: u32 },
++    Listo(Resultados),
 +    Error(String),
++}
++
++/// Qué hacer con el resultado al llegar. Las zonas van en píxeles del documento.
++enum Accion {
++    /// Una capa nueva sobre `zona ∩ lienzo` (la zona puede salirse del lienzo para tener la
++    /// proporción exacta del modelo), recortada por `mascara`.
++    Capa { zona: Rect, mascara: Option<Surface>, nombre: String },
++    /// Agrandar el lienzo a `ancho`×`alto` (centrado) y poner encima lo generado para `zona`
++    /// (en coordenadas del lienzo actual).
++    Expandir { ancho: u32, alto: u32, zona: Rect, nombre: String },
++    /// Capa con lo visible, recortada por el alfa del resultado; lo demás se oculta.
++    SinFondo,
++    /// Capa con el fondo nuevo, recortada por lo que no es el sujeto.
++    Fondo { zona: Rect, nombre: String },
++    /// Documento nuevo.
++    Ampliar { nombre: String },
 +}
 +
 +/// Una generación en marcha (o lista, esperando a que su documento vuelva a estar activo).
 +struct Trabajo {
 +    doc: DocId,
-+    zona: Rect,
-+    mascara: Option<Surface>,
-+    nombre_capa: String,
++    accion: Accion,
 +    inicio: Instant,
 +    etapa: &'static str,
 +    rx: Receiver<Evento>,
-+    listo: Option<(Vec<u8>, u32, u32)>,
++    listo: Option<Resultados>,
++}
++
++/// El último resultado colocado, para cambiar de variación o aplicarlo.
++struct Resultado {
++    doc: DocId,
++    capa: LayerId,
++    zona: Rect,
++    variaciones: Vec<Vec<u8>>,
++    actual: usize,
++    /// Se puede combinar con la capa de abajo (no un recorte, que oculta el resto).
++    aplicable: bool,
 +}
 +
 +/// El estado de la IA en la app.
@@ -321,6 +716,20 @@ index 000000000..4446e574e
 +    pub abierta: bool,
 +    /// La indicación (prompt), compartida por la ventana y la barra contextual.
 +    pub prompt: String,
++    pub herramienta: Herramienta,
++    /// El id del modelo de imagen elegido (vacío = [`MODELO`]).
++    pub modelo: String,
++    /// Cuántas variaciones pedir (1 a 3; 0 = 1).
++    pub variaciones: u32,
++    /// El texto exacto de Texto con IA.
++    pub texto: String,
++    /// El retoque elegido (índice en [`RETOQUES`]).
++    pub retoque: usize,
++    pub proporcion: Proporcion,
++    /// Mejorar resolución: 2 o 4 (0 = 2).
++    pub factor: u32,
++    /// Un documento abierto como referencia.
++    pub referencia: Option<DocId>,
 +    /// La barra contextual muestra el campo de texto.
 +    barra_expandida: bool,
 +    pub sin_seleccion: SinSeleccion,
@@ -328,6 +737,7 @@ index 000000000..4446e574e
 +    info_error: Option<String>,
 +    info_rx: Option<Receiver<Result<Info, String>>>,
 +    trabajo: Option<Trabajo>,
++    resultado: Option<Resultado>,
 +    /// El último aviso: (salió bien, texto).
 +    aviso: Option<(bool, String)>,
 +    /// Hay una sesión de Jacnex Studio (se vuelve a mirar al abrir la ventana o actualizar).
@@ -338,6 +748,54 @@ index 000000000..4446e574e
 +    /// Los límites de la selección para la barra, con lo que identifica esa selección: medirlos
 +    /// recorre sus píxeles, así que no se repite en cada cuadro.
 +    limites: Option<((DocId, u64, Rect), Option<Rect>)>,
++}
++
++impl Estado {
++    fn variaciones(&self) -> u32 {
++        self.variaciones.clamp(1, 3)
++    }
++
++    fn factor(&self) -> u32 {
++        if self.factor == 4 { 4 } else { 2 }
++    }
++
++    /// Los modelos de imagen: los del servidor, o los conocidos mientras no responde.
++    fn modelos(&self) -> Vec<ModeloInfo> {
++        match &self.info {
++            Some(i) if i.modelos.iter().any(|m| !m.herramienta) => i.modelos.iter().filter(|m| !m.herramienta).cloned().collect(),
++            _ => modelos_base(),
++        }
++    }
++
++    fn modelo_actual(&self) -> ModeloInfo {
++        let lista = self.modelos();
++        let id = if self.modelo.is_empty() { MODELO } else { self.modelo.as_str() };
++        lista.iter().find(|m| m.id == id).or_else(|| lista.iter().find(|m| m.id == MODELO)).or(lista.first()).cloned().unwrap_or_else(|| ModeloInfo {
++            id: MODELO.into(),
++            nombre: "Google Nano Banana".into(),
++            descripcion: String::new(),
++            herramienta: false,
++            aspectos: Vec::new(),
++            creditos: Vec::new(),
++        })
++    }
++
++    fn herramienta_servidor(&self, id: &str) -> Option<&ModeloInfo> {
++        self.info.as_ref()?.modelos.iter().find(|m| m.id == id)
++    }
++
++    fn elegir_herramienta(&mut self, h: Herramienta) {
++        if h == self.herramienta {
++            return;
++        }
++        if h == Herramienta::Texto {
++            self.modelo = MODELO_TEXTO.into();
++        } else if self.herramienta == Herramienta::Texto && self.modelo == MODELO_TEXTO {
++            self.modelo.clear();
++        }
++        self.herramienta = h;
++        self.aviso = None;
++    }
 +}
 +
 +/// Usa un Forgenex de pruebas en esta máquina (`http://127.0.0.1:…` o `http://localhost:…`) con
@@ -382,25 +840,89 @@ index 000000000..4446e574e
 +    {
 +        return llave.starts_with("jk_").then_some(Conexion { servidor, llave });
 +    }
-+    let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).or_else(|| {
-+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
-+    })?;
++    let base = std::env::var_os("LOCALAPPDATA")
++        .map(std::path::PathBuf::from)
++        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local").join("share")))?;
 +    let texto = std::fs::read_to_string(base.join("Jacnex Studio").join("cuenta.json")).ok()?;
 +    let v: serde_json::Value = serde_json::from_str(&texto).ok()?;
 +    let llave = v.get("llave")?.as_str()?.to_string();
 +    llave.starts_with("jk_").then_some(Conexion { servidor, llave })
 +}
 +
++/// El catálogo de `/v1/jacnex/estado`.
++fn leer_info(v: &serde_json::Value) -> Info {
++    let modelos = v
++        .get("modelos")
++        .and_then(|m| m.as_array())
++        .map(|lista| {
++            lista
++                .iter()
++                .filter_map(|m| {
++                    let s = |k: &str| m.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
++                    let id = s("id");
++                    if id.is_empty() {
++                        return None;
++                    }
++                    let proveedor = s("proveedor");
++                    let nombre = s("nombre");
++                    let herramienta = s("tipo") == "herramienta";
++                    let nombre = if herramienta || proveedor.is_empty() { nombre } else { format!("{proveedor} {nombre}") };
++                    let creditos = m
++                        .get("creditos")
++                        .and_then(|c| c.as_object())
++                        .map(|c| c.iter().filter_map(|(k, v)| Some((k.clone(), v.as_i64()?))).collect())
++                        .unwrap_or_default();
++                    let aspectos = m
++                        .get("aspectos")
++                        .and_then(|a| a.as_array())
++                        .map(|a| a.iter().filter_map(|x| x.as_str().and_then(aspecto)).collect())
++                        .unwrap_or_default();
++                    Some(ModeloInfo { id, nombre, descripcion: s("descripcion"), herramienta, aspectos, creditos })
++                })
++                .collect()
++        })
++        .unwrap_or_default();
++    Info {
++        nombre: v.get("nombre").and_then(|x| x.as_str()).unwrap_or("").to_string(),
++        creditos: v.get("creditos").and_then(|x| x.as_i64()).unwrap_or(0),
++        modelos,
++    }
++}
++
 +// --- Red (escritorio) -------------------------------------------------------------------------
++
++/// Un archivo del formulario.
++struct Archivo {
++    nombre: &'static str,
++    tipo: &'static str,
++    datos: Vec<u8>,
++}
++
++/// Un pedido a `/v1/jacnex/generar`.
++struct Envio {
++    modelo: String,
++    prompt: String,
++    tamano: Option<(u32, u32)>,
++    aspecto: Option<(u32, u32)>,
++    resolucion: Option<&'static str>,
++    factor: Option<u32>,
++    n: u32,
++    imagenes: Vec<Archivo>,
++}
++
++impl Envio {
++    fn herramienta(modelo: &str, imagen: Archivo) -> Self {
++        Envio { modelo: modelo.into(), prompt: String::new(), tamano: None, aspecto: None, resolucion: None, factor: None, n: 1, imagenes: vec![imagen] }
++    }
++}
 +
 +#[cfg(not(target_arch = "wasm32"))]
 +mod red {
-+    use super::{Conexion, Evento, Info, MODELO, es_local};
++    use super::{Conexion, Envio, Evento, Img, Info, es_local};
 +    use std::sync::mpsc::Sender;
 +    use std::time::{Duration, Instant};
 +
 +    const LIMITE_JSON: u64 = 1024 * 1024;
-+    const LIMITE_IMAGEN: u64 = 48 * 1024 * 1024;
 +
 +    fn agente(segundos: u64, https: bool) -> ureq::Agent {
 +        ureq::Agent::config_builder()
@@ -430,127 +952,161 @@ index 000000000..4446e574e
 +        Err(match (estado, msg) {
 +            (401, _) => "Tu sesión de Jacnex venció. Vuelve a iniciar sesión en Jacnex Studio.".into(),
 +            (_, Some(m)) => m,
++            (404, None) => "El servidor de Jacnex aún no tiene esta función. Inténtalo más tarde.".into(),
 +            _ => format!("El servidor respondió {estado}."),
 +        })
 +    }
 +
 +    pub fn info(c: &Conexion) -> Result<Info, String> {
-+        let url = format!("{}/v1/jacnex/estado?modelo={MODELO}", c.servidor);
++        let url = format!("{}/v1/jacnex/estado", c.servidor);
 +        let v = json(agente_para(c, 20).get(&url).header("Authorization", &format!("Bearer {}", c.llave)).call())?;
-+        let n = |p: &str| v.pointer(p).and_then(|x| x.as_i64()).unwrap_or(0);
-+        Ok(Info {
-+            nombre: v.get("nombre").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-+            creditos: n("/creditos"),
-+            costo: n("/modelo/costo"),
-+            costo_edicion: n("/modelo/costoEdicion"),
-+        })
++        Ok(super::leer_info(&v))
 +    }
 +
-+    /// Un cuerpo multipart/form-data: campos de texto y archivos PNG.
-+    fn multipart(campos: &[(&str, &str)], archivos: &[(&str, &str, &[u8])]) -> (String, Vec<u8>) {
++    /// Un cuerpo multipart/form-data: campos de texto y archivos.
++    fn multipart(campos: &[(&str, String)], archivos: &[super::Archivo]) -> (String, Vec<u8>) {
 +        let semilla = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-+        let limite = format!("----photonex{semilla:x}{:x}", archivos.iter().map(|a| a.2.len()).sum::<usize>());
++        let limite = format!("----photonex{semilla:x}{:x}", archivos.iter().map(|a| a.datos.len()).sum::<usize>());
 +        let mut b = Vec::new();
 +        for (k, v) in campos {
 +            b.extend_from_slice(format!("--{limite}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
 +        }
-+        for (k, nombre, datos) in archivos {
++        for a in archivos {
 +            b.extend_from_slice(
-+                format!("--{limite}\r\nContent-Disposition: form-data; name=\"{k}\"; filename=\"{nombre}\"\r\nContent-Type: image/png\r\n\r\n").as_bytes(),
++                format!("--{limite}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n", a.nombre, a.tipo)
++                    .as_bytes(),
 +            );
-+            b.extend_from_slice(datos);
++            b.extend_from_slice(&a.datos);
 +            b.extend_from_slice(b"\r\n");
 +        }
 +        b.extend_from_slice(format!("--{limite}--\r\n").as_bytes());
 +        (format!("multipart/form-data; boundary={limite}"), b)
 +    }
 +
-+    pub struct Pedido {
-+        pub conexion: Conexion,
-+        pub prompt: String,
-+        pub tamano: String,
-+        pub imagenes: Vec<Vec<u8>>,
-+    }
-+
-+    /// Crea el trabajo, espera el resultado y lo descarga; todo lo cuenta por `tx`.
-+    pub fn generar(p: Pedido, tx: &Sender<Evento>) -> Result<(), String> {
-+        let c = &p.conexion;
++    /// Crea los trabajos de `e`, espera sus resultados y los descarga (hasta `limite` bytes cada
++    /// uno). Devuelve las imágenes y cuántas variaciones fallaron.
++    pub fn generar(c: &Conexion, e: Envio, limite: u64, tx: &Sender<Evento>) -> Result<(Vec<Img>, usize), String> {
 +        let auth = format!("Bearer {}", c.llave);
 +        let _ = tx.send(Evento::Etapa("Enviando la imagen…"));
-+        let archivos: Vec<(&str, &str, &[u8])> =
-+            p.imagenes.iter().enumerate().map(|(i, d)| ("image", if i == 0 { "imagen.png" } else { "mascara.png" }, d.as_slice())).collect();
-+        let (tipo, cuerpo) = multipart(&[("model", MODELO), ("prompt", &p.prompt), ("size", &p.tamano)], &archivos);
++        let mut campos = vec![("model", e.modelo.clone()), ("prompt", e.prompt.clone()), ("n", e.n.to_string())];
++        if let Some((w, h)) = e.tamano {
++            campos.push(("size", format!("{w}x{h}")));
++        }
++        if let Some((a, b)) = e.aspecto {
++            campos.push(("aspect", format!("{a}:{b}")));
++        }
++        if let Some(r) = e.resolucion {
++            campos.push(("resolution", r.to_string()));
++        }
++        if let Some(f) = e.factor {
++            campos.push(("factor", f.to_string()));
++        }
++        let (tipo, cuerpo) = multipart(&campos, &e.imagenes);
++        drop(e);
 +        let url = format!("{}/v1/jacnex/generar", c.servidor);
-+        let v = json(agente_para(c, 120).post(&url).header("Authorization", &auth).header("Content-Type", &tipo).send(&cuerpo[..]))?;
-+        let id = v.get("id").and_then(|x| x.as_str()).ok_or("El servidor no devolvió el trabajo.")?.to_string();
++        let v = json(agente_para(c, 180).post(&url).header("Authorization", &auth).header("Content-Type", &tipo).send(&cuerpo[..]))?;
++        drop(cuerpo);
++        let mut ids: Vec<String> =
++            v.get("ids").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|i| i.as_str().map(str::to_string)).collect()).unwrap_or_default();
++        if ids.is_empty() {
++            ids.extend(v.get("id").and_then(|x| x.as_str()).map(str::to_string));
++        }
++        if ids.is_empty() {
++            return Err("El servidor no devolvió el trabajo.".into());
++        }
 +        let _ = tx.send(Evento::Cobrado { saldo: v.get("saldo").and_then(|x| x.as_i64()) });
 +        let _ = tx.send(Evento::Etapa("La IA está creando…"));
 +        let inicio = Instant::now();
-+        let consulta = format!("{}/v1/jacnex/trabajo/{id}", c.servidor);
-+        let url_resultado = loop {
++        let mut listos: Vec<String> = Vec::new();
++        let mut error: Option<String> = None;
++        let mut fallidas = 0;
++        while !ids.is_empty() {
 +            std::thread::sleep(Duration::from_millis(1500));
-+            if inicio.elapsed() > Duration::from_secs(300) {
-+                return Err("La IA tardó demasiado. Si no llega, tus créditos se devuelven solos.".into());
-+            }
-+            let v = match json(agente_para(c, 30).get(&consulta).header("Authorization", &auth).call()) {
-+                Ok(v) => v,
-+                // Un corte de red momentáneo no pierde el trabajo: se vuelve a consultar.
-+                Err(e) if e.starts_with("No se pudo conectar") => continue,
-+                Err(e) => return Err(e),
-+            };
-+            match v.get("estado").and_then(|x| x.as_str()) {
-+                Some("listo") => {
-+                    break v.pointer("/resultados/0").and_then(|x| x.as_str()).ok_or("La IA no devolvió ninguna imagen.")?.to_string();
++            if inicio.elapsed() > Duration::from_secs(420) {
++                if listos.is_empty() {
++                    return Err("La IA tardó demasiado. Si no llega, tus créditos se devuelven solos.".into());
 +                }
-+                Some("fallido") => {
-+                    let e = v.get("error").and_then(|x| x.as_str()).unwrap_or("La IA no pudo completar la imagen.");
-+                    return Err(format!("{e} Tus créditos fueron devueltos."));
-+                }
-+                _ => {}
++                fallidas += ids.len();
++                break;
 +            }
-+        };
++            let mut quedan = Vec::new();
++            for id in ids {
++                let consulta = format!("{}/v1/jacnex/trabajo/{id}", c.servidor);
++                let v = match json(agente_para(c, 30).get(&consulta).header("Authorization", &auth).call()) {
++                    Ok(v) => v,
++                    // Un corte de red momentáneo no pierde el trabajo: se vuelve a consultar.
++                    Err(m) if m.starts_with("No se pudo conectar") => {
++                        quedan.push(id);
++                        continue;
++                    }
++                    Err(m) => return Err(m),
++                };
++                match v.get("estado").and_then(|x| x.as_str()) {
++                    Some("listo") => match v.pointer("/resultados/0").and_then(|x| x.as_str()) {
++                        Some(u) => listos.push(u.to_string()),
++                        None => fallidas += 1,
++                    },
++                    Some("fallido") => {
++                        fallidas += 1;
++                        error = Some(v.get("error").and_then(|x| x.as_str()).unwrap_or("La IA no pudo completar la imagen.").to_string());
++                    }
++                    _ => quedan.push(id),
++                }
++            }
++            ids = quedan;
++        }
++        if listos.is_empty() {
++            return Err(format!("{} Tus créditos fueron devueltos.", error.unwrap_or_else(|| "La IA no devolvió ninguna imagen.".into())));
++        }
 +        let _ = tx.send(Evento::Etapa("Descargando el resultado…"));
-+        let local = es_local(&url_resultado) && es_local(&c.servidor);
-+        if !local && !url_resultado.starts_with("https://") {
++        let mut imagenes = Vec::new();
++        for u in listos {
++            imagenes.push(descargar(c, &u, &auth, limite)?);
++        }
++        Ok((imagenes, fallidas))
++    }
++
++    fn descargar(c: &Conexion, url: &str, auth: &str, limite: u64) -> Result<Img, String> {
++        let local = es_local(url) && es_local(&c.servidor);
++        if !local && !url.starts_with("https://") {
 +            return Err("La dirección del resultado no es segura.".into());
 +        }
 +        // La llave solo viaja a Jacnex: los resultados alojados en otro sitio se piden sin ella.
-+        let mut pedido = agente(120, !local).get(&url_resultado);
-+        if url_resultado.starts_with(&format!("{}/", c.servidor)) {
-+            pedido = pedido.header("Authorization", &auth);
++        let mut pedido = agente(300, !local).get(url);
++        if url.starts_with(&format!("{}/", c.servidor)) {
++            pedido = pedido.header("Authorization", auth);
 +        }
 +        let mut r = pedido.call().map_err(|e| format!("No se pudo descargar el resultado: {e}"))?;
 +        if !r.status().is_success() {
 +            return Err(format!("No se pudo descargar el resultado ({}).", r.status().as_u16()));
 +        }
-+        let bytes = r.body_mut().with_config().limit(LIMITE_IMAGEN).read_to_vec().map_err(|e| format!("Descarga incompleta: {e}"))?;
++        let bytes = r.body_mut().with_config().limit(limite).read_to_vec().map_err(|e| format!("Descarga incompleta: {e}"))?;
 +        let img = photocraft_codecs::decode(&bytes).map_err(|e| format!("La imagen recibida no se pudo leer: {e}"))?;
-+        let _ = tx.send(Evento::Listo { rgba: img.to_rgba8(), ancho: img.width(), alto: img.height() });
-+        Ok(())
++        let (ancho, alto) = (img.width(), img.height());
++        if ancho == 0 || alto == 0 || ancho > photocraft_engine::jacnex_ia::MAX_SIDE || alto > photocraft_engine::jacnex_ia::MAX_SIDE {
++            return Err("La imagen recibida tiene un tamaño no válido.".into());
++        }
++        Ok(Img { rgba: img.to_rgba8(), ancho, alto })
 +    }
 +}
 +
 +#[cfg(target_arch = "wasm32")]
 +mod red {
-+    use super::{Conexion, Evento, Info};
++    use super::{Conexion, Envio, Evento, Img, Info};
 +    use std::sync::mpsc::Sender;
 +    const SOLO_ESCRITORIO: &str = "La IA está disponible en la app de escritorio.";
-+    pub struct Pedido {
-+        pub conexion: Conexion,
-+        pub prompt: String,
-+        pub tamano: String,
-+        pub imagenes: Vec<Vec<u8>>,
-+    }
 +    pub fn info(_: &Conexion) -> Result<Info, String> {
 +        Err(SOLO_ESCRITORIO.into())
 +    }
-+    pub fn generar(_: Pedido, _: &Sender<Evento>) -> Result<(), String> {
++    pub fn generar(_: &Conexion, _: Envio, _: u64, _: &Sender<Evento>) -> Result<(Vec<Img>, usize), String> {
 +        Err(SOLO_ESCRITORIO.into())
 +    }
 +}
 +
++const MB: u64 = 1024 * 1024;
++
 +/// Corre `f` en un hilo y devuelve por dónde llega su respuesta.
-+fn en_hilo<T: Send + 'static>(f: impl FnOnce(std::sync::mpsc::Sender<T>) + Send + 'static) -> Receiver<T> {
++fn en_hilo<T: Send + 'static>(f: impl FnOnce(Sender<T>) + Send + 'static) -> Receiver<T> {
 +    let (tx, rx) = std::sync::mpsc::channel();
 +    #[cfg(not(target_arch = "wasm32"))]
 +    {
@@ -584,6 +1140,11 @@ index 000000000..4446e574e
 +fn cubrir(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 +    let mut out = vec![0u8; dw as usize * dh as usize * 4];
 +    if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw as usize * sh as usize * 4 {
++        return out;
++    }
++    if (sw, sh) == (dw, dh) {
++        let n = out.len();
++        out.copy_from_slice(&src[..n]);
 +        return out;
 +    }
 +    // Reducciones de más de la mitad: primero bloques enteros, para no perder detalle a saltos.
@@ -638,78 +1199,322 @@ index 000000000..4446e574e
 +    (out, w, h)
 +}
 +
-+/// El tamaño de envío: el de la zona, con el lado largo a lo sumo [`MAX_LADO`].
-+fn tamano_envio(w: u32, h: u32) -> (u32, u32) {
++/// `w`×`h` escalado para que el lado largo sea a lo sumo `max`, manteniendo la forma.
++fn caber(w: u32, h: u32, max: u32) -> (u32, u32) {
 +    let largo = w.max(h).max(1);
-+    if largo <= MAX_LADO {
++    if largo <= max {
 +        return (w.max(1), h.max(1));
 +    }
-+    let f = MAX_LADO as f32 / largo as f32;
++    let f = max as f32 / largo as f32;
 +    (((w as f32 * f).round() as u32).max(1), ((h as f32 * f).round() as u32).max(1))
 +}
 +
-+fn png(rgba: Vec<u8>, w: u32, h: u32) -> Result<Vec<u8>, String> {
-+    let img = photocraft_codecs::Image::from_u8(w, h, photocraft_codecs::ChannelLayout::Rgba, rgba).map_err(|e| e.to_string())?;
-+    photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &photocraft_codecs::EncodeOptions::default()).map_err(|e| e.to_string())
++/// El tamaño de envío a un modelo de imagen.
++fn tamano_envio(w: u32, h: u32) -> (u32, u32) {
++    caber(w, h, MAX_LADO)
 +}
 +
-+/// Las instrucciones para el modelo (en inglés, que es como mejor las sigue). Lo que la persona
-+/// escribe va tal cual.
-+fn instrucciones(pedido: &str, con_seleccion: bool, modo: SinSeleccion) -> String {
-+    let pedido = pedido.trim();
-+    if con_seleccion {
-+        let que = if pedido.is_empty() {
-+            "remove what is there and fill it naturally so it blends with its surroundings".to_string()
-+        } else {
-+            format!("in that area: {pedido}")
-+        };
-+        format!(
-+            "Image 1 is a photo. Image 2 is a mask: its white area marks the region to change. Edit only that region of image 1 — {que}. \
-+             Match the lighting, perspective, colors and grain of the rest of the photo. Keep everything outside the white area exactly as it is, \
-+             with the same framing and size. Return only the edited photo."
-+        )
-+    } else {
-+        match modo {
-+            SinSeleccion::EditarTodo => format!("Edit this image: {pedido}. Keep the same framing and composition unless asked otherwise."),
-+            SinSeleccion::CrearNueva => pedido.to_string(),
++/// El tamaño de envío a Quitar fondo: lado largo ≤ 2048 y corto ≥ 256 (agrandando si hace falta).
++fn tamano_recorte(w: u32, h: u32) -> Result<(u32, u32), String> {
++    let (w, h) = caber(w, h, MAX_LADO_RECORTE);
++    let corto = w.min(h).max(1);
++    if corto >= MIN_LADO_RECORTE {
++        return Ok((w, h));
++    }
++    let f = MIN_LADO_RECORTE as f32 / corto as f32;
++    let (nw, nh) = (((w as f32 * f).round() as u32).max(MIN_LADO_RECORTE), ((h as f32 * f).round() as u32).max(MIN_LADO_RECORTE));
++    if nw.max(nh) > 4096 { Err("La imagen es demasiado alargada para quitarle el fondo.".into()) } else { Ok((nw, nh)) }
++}
++
++/// `rect` agrandado (sin deformar lo que contiene) a la proporción de `aspectos` más cercana:
++/// primero dentro de `lienzo`, y si no cabe, centrado sobre él (lo que sale fuera se rellena al
++/// enviar y se descarta al colocar). Sin proporciones, `rect` tal cual.
++fn ajustar_aspecto(rect: Rect, lienzo: Rect, aspectos: &[(u32, u32)]) -> (Rect, Option<(u32, u32)>) {
++    let (w, h) = (f64::from(rect.width().max(1)), f64::from(rect.height().max(1)));
++    let Some(&a) = aspectos.iter().min_by(|x, y| {
++        let d = |p: &(u32, u32)| ((f64::from(p.0) / f64::from(p.1)).ln() - (w / h).ln()).abs();
++        d(x).total_cmp(&d(y))
++    }) else {
++        return (rect, None);
++    };
++    let r = f64::from(a.0) / f64::from(a.1);
++    let (nw, nh) = if w / h < r { ((h * r).round(), h) } else { (w, (w / r).round()) };
++    let (nw, nh) = (nw.min(f64::from(i32::MAX / 4)) as i32, nh.min(f64::from(i32::MAX / 4)) as i32);
++    let colocar = |a0: i32, len: i32, nlen: i32, l0: i32, l1: i32| -> i32 {
++        let ini = a0 - (nlen - len) / 2;
++        if nlen <= l1 - l0 { ini.clamp(l0, l1 - nlen) } else { l0 - (nlen - (l1 - l0)) / 2 }
++    };
++    let x0 = colocar(rect.x0, rect.width() as i32, nw, lienzo.x0, lienzo.x1);
++    let y0 = colocar(rect.y0, rect.height() as i32, nh, lienzo.y0, lienzo.y1);
++    (Rect::new(x0, y0, x0 + nw, y0 + nh), Some(a))
++}
++
++/// Lo visible del documento en `zona`, RGBA8, sobre gris donde es transparente o cae fuera de
++/// `lienzo` (`.3` = alfa original, para Quitar fondo).
++fn vista(doc: &photocraft_doc::Document, zona: Rect, lienzo: Rect) -> Vec<u8> {
++    let dentro = zona.intersect(&lienzo);
++    let (w, h) = (zona.width() as usize, zona.height() as usize);
++    let mut out = Vec::with_capacity(w * h * 4);
++    for _ in 0..w * h {
++        out.extend_from_slice(&[GRIS[0], GRIS[1], GRIS[2], 255]);
++    }
++    if dentro.is_empty() {
++        return out;
++    }
++    let px = motor::composite_rgba8(doc, dentro);
++    let (dw, ox, oy) = (dentro.width() as usize, (dentro.x0 - zona.x0) as usize, (dentro.y0 - zona.y0) as usize);
++    for (i, p) in px.iter().enumerate() {
++        let (x, y) = (i % dw + ox, i / dw + oy);
++        let o = (y * w + x) * 4;
++        let a = u32::from(p[3]);
++        for c in 0..3 {
++            out[o + c] = ((u32::from(p[c]) * a + u32::from(GRIS[c]) * (255 - a) + 127) / 255) as u8;
 +        }
++    }
++    out
++}
++
++/// El trozo `sub` (dentro de `zona`) de `px` (RGBA8 o de un byte por píxel, `canales`).
++fn recortar(px: &[u8], zona: Rect, sub: Rect, canales: usize) -> Vec<u8> {
++    let sub = sub.intersect(&zona);
++    let (zw, sw) = (zona.width() as usize, sub.width() as usize);
++    let mut out = Vec::with_capacity(sw * sub.height() as usize * canales);
++    for y in sub.y0..sub.y1 {
++        let ini = (((y - zona.y0) as usize) * zw + (sub.x0 - zona.x0) as usize) * canales;
++        if let Some(fila) = px.get(ini..ini + sw * canales) {
++            out.extend_from_slice(fila);
++        }
++    }
++    out
++}
++
++fn codificar(rgba: Vec<u8>, w: u32, h: u32, formato: photocraft_codecs::Format, layout: photocraft_codecs::ChannelLayout) -> Result<Vec<u8>, String> {
++    let img = photocraft_codecs::Image::from_u8(w, h, layout, rgba).map_err(|e| e.to_string())?;
++    let op = photocraft_codecs::EncodeOptions { jpeg_quality: 92, ..Default::default() };
++    photocraft_codecs::encode(&img, formato, &op).map_err(|e| format!("No se pudo preparar la imagen: {e}"))
++}
++
++/// RGBA8 (opaca) a JPEG: mucho más liviana que PNG, así se sube rápido.
++fn jpg(rgba: &[u8], w: u32, h: u32, nombre: &'static str) -> Result<Archivo, String> {
++    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
++    Ok(Archivo { nombre, tipo: "image/jpeg", datos: codificar(rgb, w, h, photocraft_codecs::Format::Jpeg, photocraft_codecs::ChannelLayout::Rgb)? })
++}
++
++/// Una máscara (un byte por píxel) a PNG en escala de grises.
++fn png_gris(gris: Vec<u8>, w: u32, h: u32) -> Result<Archivo, String> {
++    Ok(Archivo {
++        nombre: "mascara.png",
++        tipo: "image/png",
++        datos: codificar(gris, w, h, photocraft_codecs::Format::Png, photocraft_codecs::ChannelLayout::Gray)?,
++    })
++}
++
++/// Una máscara de un byte por píxel escalada a `dw`×`dh`.
++fn escalar_gris(gris: &[u8], w: u32, h: u32, dw: u32, dh: u32) -> Vec<u8> {
++    let rgba: Vec<u8> = gris.iter().flat_map(|&v| [v, v, v, 255]).collect();
++    cubrir(&rgba, w, h, dw, dh).as_chunks::<4>().0.iter().map(|p| p[0]).collect()
++}
++
++/// El alfa de `img` escalado a `w`×`h`.
++fn alfa_de(img: &Img, w: u32, h: u32) -> Vec<u8> {
++    let rgba: Vec<u8> = img.rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[3], p[3], p[3], 255]).collect();
++    cubrir(&rgba, img.ancho, img.alto, w, h).as_chunks::<4>().0.iter().map(|p| p[0]).collect()
++}
++
++/// La máscara de Expandir en `zona`: blanca (generar) fuera de `original`, negra dentro, con un
++/// borde suave de `suave` px hacia dentro en los lados que tocan lo nuevo, para que no se note
++/// la unión.
++fn mascara_expandir(zona: Rect, original: Rect, suave: i32) -> Vec<u8> {
++    let (w, h) = (zona.width() as usize, zona.height() as usize);
++    let mut out = vec![255u8; w * h];
++    let suave = suave.max(1);
++    let lados = [original.x0 > zona.x0, original.x1 < zona.x1, original.y0 > zona.y0, original.y1 < zona.y1];
++    for y in original.y0.max(zona.y0)..original.y1.min(zona.y1) {
++        for x in original.x0.max(zona.x0)..original.x1.min(zona.x1) {
++            let mut d = i32::MAX;
++            for (lado, dist) in lados.iter().zip([x - original.x0, original.x1 - 1 - x, y - original.y0, original.y1 - 1 - y]) {
++                if *lado {
++                    d = d.min(dist);
++                }
++            }
++            let v = if d >= suave { 0 } else { (255 - (d * 255 / suave)).clamp(0, 255) as u8 };
++            out[(y - zona.y0) as usize * w + (x - zona.x0) as usize] = v;
++        }
++    }
++    out
++}
++
++// --- Instrucciones para el modelo ---------------------------------------------------------------
++
++/// Las instrucciones (en inglés, que es como mejor las siguen los modelos). Lo que la persona
++/// escribe va tal cual.
++fn instrucciones(h: Herramienta, pedido: &str, texto: &str, con_seleccion: bool, modo: SinSeleccion, retoque: usize, con_referencia: bool) -> String {
++    let pedido = pedido.trim();
++    let referencia = if con_referencia {
++        " The last image is a reference: use it for the look of what you add (its subject, style and colors), not for the framing."
++    } else {
++        ""
++    };
++    let mascara = |que: &str| {
++        format!(
++            "Image 1 is a photo. Image 2 is a mask: its white area marks the region to change. Edit only that region of image 1: {que}. \
++             Match the lighting, perspective, colors, sharpness and grain of the rest of the photo. Keep everything outside the white area exactly as it is, \
++             with the same framing and size. Return only the edited photo.{referencia}"
++        )
++    };
++    match h {
++        Herramienta::QuitarObjeto => mascara(
++            "remove the objects or people inside it completely, including their shadows and reflections, and fill the area with what would naturally be behind them, \
++             continuing the surrounding background seamlessly. Do not add anything new",
++        ),
++        Herramienta::Relleno if con_seleccion => {
++            if pedido.is_empty() {
++                mascara("remove what is there and fill it naturally so it blends with its surroundings")
++            } else {
++                mascara(&format!("draw {pedido}"))
++            }
++        }
++        Herramienta::Relleno => match modo {
++            SinSeleccion::EditarTodo => format!("Edit this image: {pedido}. Keep the same framing and composition unless asked otherwise.{referencia}"),
++            SinSeleccion::CrearNueva if con_referencia => format!("{pedido}. Use the image as a reference for the subject and style."),
++            SinSeleccion::CrearNueva => pedido.to_string(),
++        },
++        Herramienta::Expandir => {
++            let extra = if pedido.is_empty() { String::new() } else { format!(" In the new area: {pedido}.") };
++            format!(
++                "Image 1 is a photo placed in the middle of a larger canvas; the gray border is empty. Image 2 is a mask: white marks the empty area. \
++                 Extend the photo into the white area so the result looks like one wider original photo: continue the scene, lighting, perspective, colors and grain seamlessly.{extra} \
++                 Keep the original photo exactly as it is. Return only the full image.{referencia}"
++            )
++        }
++        Herramienta::GenerarFondo => {
++            let fondo = if pedido.is_empty() { "a clean, professional studio background" } else { pedido };
++            format!(
++                "Image 1 is a photo. Image 2 is a mask: white marks the background. Replace the background with: {fondo}. \
++                 Keep the main subject (the black area of the mask) exactly as it is, with its shape, colors and details. \
++                 Make the new background's lighting, perspective and shadows match the subject naturally. Return only the edited photo.{referencia}"
++            )
++        }
++        Herramienta::Texto => {
++            let estilo = if pedido.is_empty() { "clean, bold and legible, matching the image's style and colors".to_string() } else { pedido.to_string() };
++            let donde = if con_seleccion { "inside the white area of the mask (image 2)" } else { "in the most suitable place of the image" };
++            let base = format!(
++                "Add the text \"{}\" {donde}. Write it exactly as given, letter by letter, with correct spelling and accents. Text style: {estilo}.",
++                texto.trim()
++            );
++            if con_seleccion {
++                format!(
++                    "Image 1 is a photo. Image 2 is a mask. {base} Keep everything outside the white area exactly as it is, with the same framing and size. Return only the edited photo."
++                )
++            } else {
++                format!("{base} Keep the rest of the image exactly as it is, with the same framing.")
++            }
++        }
++        Herramienta::Retoque => {
++            let base = RETOQUES.get(retoque).map_or(RETOQUES[0].1, |r| r.1);
++            if pedido.is_empty() { base.to_string() } else { format!("{base} Also: {pedido}.") }
++        }
++        Herramienta::QuitarFondo | Herramienta::MejorarResolucion => String::new(),
 +    }
 +}
 +
-+fn nombre_capa(pedido: &str) -> String {
++fn nombre_capa(prefijo: &str, pedido: &str) -> String {
 +    let p = pedido.trim();
 +    if p.is_empty() {
-+        return "IA · Relleno".into();
++        return format!("IA · {prefijo}");
 +    }
 +    let corto: String = p.chars().take(32).collect();
 +    if corto.chars().count() < p.chars().count() { format!("IA · {corto}…") } else { format!("IA · {corto}") }
 +}
 +
-+// --- Generar ----------------------------------------------------------------------------------
++// --- Plan: qué haría Generar ahora --------------------------------------------------------------
 +
-+/// Qué haría Generar ahora, para explicarlo antes de gastar créditos.
++/// Qué haría Generar ahora, para explicarlo y cotizarlo antes de gastar créditos.
 +struct Plan {
 +    con_seleccion: bool,
++    /// La selección o el lienzo.
 +    zona: Rect,
++    lienzo: Rect,
 +    costo: Option<i64>,
++    /// Por qué no se puede generar ahora.
++    falta: Option<String>,
 +}
 +
 +fn plan(app: &mut PhotocraftApp) -> Option<Plan> {
 +    let limites = limites_seleccion(app);
 +    let d = app.session.active()?;
-+    let con_seleccion = limites.is_some();
-+    let edita = con_seleccion || app.jacnex_ia.sin_seleccion == SinSeleccion::EditarTodo;
-+    let costo = app.jacnex_ia.info.as_ref().map(|i| if edita { i.costo_edicion } else { i.costo });
-+    Some(Plan { con_seleccion, zona: limites.unwrap_or_else(|| d.doc.bounds()), costo })
++    let e = &app.jacnex_ia;
++    let lienzo = d.doc.bounds();
++    let h = e.herramienta;
++    let con_seleccion = limites.is_some() && h.usa_seleccion();
++    let zona = limites.filter(|_| con_seleccion).unwrap_or(lienzo);
++    let n = if h.admite_variaciones() { i64::from(e.variaciones()) } else { 1 };
++    let m = e.modelo_actual();
++    let costo_imagen = |r: Rect| -> Option<i64> {
++        let (s, _) = ajustar_aspecto(r, lienzo, &m.aspectos);
++        let (ew, eh) = tamano_envio(s.width(), s.height());
++        m.costo(nivel(ew.max(eh)))
++    };
++    let (costo, falta) = match h {
++        Herramienta::QuitarFondo => (e.herramienta_servidor("quitar-fondo").and_then(|t| t.costo("unica")), None),
++        Herramienta::MejorarResolucion => {
++            let f = e.factor();
++            let largo = lienzo.width().max(lienzo.height());
++            let falta = (largo.saturating_mul(f) > MAX_LADO_AMPLIADO)
++                .then(|| format!("La imagen ya es grande: ×{f} pasaría de {MAX_LADO_AMPLIADO} px. Prueba ×2 o reduce la imagen primero."));
++            (e.herramienta_servidor("mejorar-resolucion").and_then(|t| t.costo(&format!("x{f}"))), falta)
++        }
++        Herramienta::GenerarFondo => {
++            let recorte = e.herramienta_servidor("quitar-fondo").and_then(|t| t.costo("unica"));
++            (recorte.zip(costo_imagen(lienzo)).map(|(a, b)| a + b * n), None)
++        }
++        Herramienta::Expandir => match lienzo_expandido(lienzo.width(), lienzo.height(), e.proporcion) {
++            Some((nw, nh)) => {
++                let nuevo = Rect::new(0, 0, nw as i32, nh as i32);
++                (costo_imagen(nuevo).map(|c| c * n), None)
++            }
++            None => (None, Some("La imagen ya tiene esa proporción: elige otra.".into())),
++        },
++        _ => {
++            let contexto = if con_seleccion { motor::context_rect(zona, lienzo, MARGEN) } else { lienzo };
++            let falta = if h.pide_seleccion() && !con_seleccion {
++                Some("Primero selecciona lo que quieres quitar (Marco, Lazo, Selección de objetos…).".into())
++            } else if h == Herramienta::Texto && e.texto.trim().is_empty() {
++                Some("Escribe el texto que quieres en la imagen.".into())
++            } else if h == Herramienta::Relleno && !con_seleccion && e.prompt.trim().is_empty() {
++                Some("Escribe una indicación para continuar.".into())
++            } else {
++                None
++            };
++            (costo_imagen(contexto).map(|c| c * n), falta)
++        }
++    };
++    let pixeles = u64::from(lienzo.width()) * u64::from(lienzo.height());
++    let falta = falta.or_else(|| (pixeles > MAX_PIXELES).then(|| "La imagen es demasiado grande para la IA (más de 80 MP). Redúcela primero.".into()));
++    Some(Plan { con_seleccion, zona, lienzo, costo, falta })
 +}
 +
 +pub fn ocupado(app: &PhotocraftApp) -> bool {
 +    app.jacnex_ia.trabajo.as_ref().is_some_and(|t| t.listo.is_none())
 +}
 +
-+/// Empieza una generación con la indicación actual.
++/// Hay una generación en marcha o un resultado esperando a que su documento vuelva a estar activo.
++pub fn hay_trabajo(app: &PhotocraftApp) -> bool {
++    app.jacnex_ia.trabajo.is_some()
++}
++
++/// El último aviso de la IA (resultado o error).
++pub fn aviso(app: &PhotocraftApp) -> Option<String> {
++    app.jacnex_ia.aviso.as_ref().map(|a| a.1.clone())
++}
++
++/// Empieza una generación con la herramienta y la indicación actuales.
 +pub fn generar(app: &mut PhotocraftApp) {
 +    if app.jacnex_ia.trabajo.is_some() {
++        return;
++    }
++    if let Some(Some(f)) = plan(app).map(|p| p.falta) {
++        app.jacnex_ia.aviso = Some((false, f));
 +        return;
 +    }
 +    match preparar(app) {
@@ -721,48 +1526,189 @@ index 000000000..4446e574e
 +    }
 +}
 +
++/// La imagen de referencia (otro documento abierto), lista para enviar.
++fn referencia(app: &PhotocraftApp) -> Option<(Vec<u8>, u32, u32)> {
++    let id = app.jacnex_ia.referencia?;
++    let d = app.session.documents().iter().find(|d| d.doc.id == id)?;
++    let r = d.doc.bounds();
++    if r.is_empty() || u64::from(r.width()) * u64::from(r.height()) > MAX_PIXELES {
++        return None;
++    }
++    let px = vista(&d.doc, r, r);
++    let (w, h) = caber(r.width(), r.height(), MAX_LADO_REFERENCIA);
++    Some((cubrir(&px, r.width(), r.height(), w, h), w, h))
++}
++
 +fn preparar(app: &PhotocraftApp) -> Result<Trabajo, String> {
 +    let conexion = conexion(&app.jacnex_ia).ok_or("Inicia sesión en Jacnex Studio para usar la IA.")?;
 +    let e = &app.jacnex_ia;
 +    let d = app.session.active().ok_or("Abre o crea un documento primero.")?;
-+    let z = motor::zone(&app.session, MARGEN).ok_or("La selección está fuera del lienzo.")?;
-+    let con_seleccion = z.selected.is_some();
-+    if !con_seleccion && e.prompt.trim().is_empty() {
-+        return Err("Escribe qué quieres que haga la IA.".into());
++    let lienzo = d.doc.bounds();
++    if lienzo.is_empty() {
++        return Err("El documento está vacío.".into());
 +    }
-+    let crear = !con_seleccion && e.sin_seleccion == SinSeleccion::CrearNueva;
-+    let (w, h) = (z.context.width(), z.context.height());
-+    let (ew, eh) = tamano_envio(w, h);
-+    let mut imagenes = Vec::new();
-+    if !crear {
-+        let px: Vec<u8> = motor::composite_rgba8(&d.doc, z.context).into_iter().flatten().collect();
-+        imagenes.push(png(cubrir(&px, w, h, ew, eh), ew, eh)?);
-+        if let Some(sel) = z.selection.as_ref() {
-+            let m: Vec<u8> = motor::coverage(sel, z.context).into_iter().flat_map(|v| [v, v, v, 255]).collect();
-+            imagenes.push(png(cubrir(&m, w, h, ew, eh), ew, eh)?);
-+        }
++    let h = e.herramienta;
++    let m = e.modelo_actual();
++    let n = if h.admite_variaciones() { e.variaciones() } else { 1 };
++    let refe = if h.admite_referencia() { referencia(app) } else { None };
++    let con_ref = refe.is_some();
++    let nombre_doc = d.doc.name.clone();
++
++    // Lo que se manda a un modelo de imagen para `zona` (ajustada a su proporción), con máscara.
++    struct Imagen {
++        zona: Rect,
++        aspecto: Option<(u32, u32)>,
++        envio: (u32, u32),
++        px: Option<Vec<u8>>,
++        mascara: Option<Vec<u8>>,
 +    }
-+    let pedido = red::Pedido {
-+        conexion,
-+        prompt: instrucciones(&e.prompt, con_seleccion, e.sin_seleccion),
-+        tamano: format!("{ew}x{eh}"),
-+        imagenes,
++    let a_envio = |zona: Rect, px: Option<Vec<u8>>, mascara: Option<Vec<u8>>| -> Imagen {
++        let (s, aspecto) = ajustar_aspecto(zona, lienzo, &m.aspectos);
++        let envio = tamano_envio(s.width(), s.height());
++        Imagen { zona: s, aspecto, envio, px, mascara }
 +    };
-+    let rx = en_hilo(move |tx| {
-+        if let Err(m) = red::generar(pedido, &tx) {
-+            let _ = tx.send(Evento::Error(m));
++    let envio_modelo = |im: &Imagen, prompt: String| -> Result<Envio, String> {
++        let (ew, eh) = im.envio;
++        let (w, hh) = (im.zona.width(), im.zona.height());
++        let mut imagenes = Vec::new();
++        if let Some(px) = &im.px {
++            imagenes.push(jpg(&cubrir(px, w, hh, ew, eh), ew, eh, "imagen.jpg")?);
++        }
++        if let Some(mk) = &im.mascara {
++            imagenes.push(png_gris(escalar_gris(mk, w, hh, ew, eh), ew, eh)?);
++        }
++        if let Some((px, rw, rh)) = &refe {
++            imagenes.push(jpg(px, *rw, *rh, "referencia.jpg")?);
++        }
++        Ok(Envio {
++            modelo: m.id.clone(),
++            prompt,
++            tamano: Some((ew, eh)),
++            aspecto: im.aspecto,
++            resolucion: m.tiene_resoluciones().then(|| nivel(ew.max(eh))),
++            factor: None,
++            n,
++            imagenes,
++        })
++    };
++    let prompt = |con_sel: bool| instrucciones(h, &e.prompt, &e.texto, con_sel, e.sin_seleccion, e.retoque, con_ref);
++
++    // Generar fondo manda además la foto reducida para el segundo paso: (píxeles, ancho, alto, zona).
++    type Segundo = Option<(Vec<u8>, u32, u32, Rect)>;
++    let (accion, envio, extra): (Accion, Option<Envio>, Segundo) = match h {
++        Herramienta::Relleno | Herramienta::QuitarObjeto | Herramienta::Texto | Herramienta::Retoque => {
++            let z = motor::zone(&app.session, MARGEN).ok_or("La selección está fuera del lienzo.")?;
++            let con_sel = z.selected.is_some() && h.usa_seleccion();
++            let crear = h == Herramienta::Relleno && !con_sel && e.sin_seleccion == SinSeleccion::CrearNueva;
++            let contexto = if con_sel { z.context } else { lienzo };
++            let (s, _) = ajustar_aspecto(contexto, lienzo, &m.aspectos);
++            let px = (!crear).then(|| vista(&d.doc, s, lienzo));
++            let mascara = if con_sel { z.selection.as_ref().map(|sel| motor::coverage(sel, s)) } else { None };
++            let im = a_envio(contexto, px, mascara);
++            let prefijo = match h {
++                Herramienta::QuitarObjeto => "Objeto quitado",
++                Herramienta::Texto => "Texto",
++                Herramienta::Retoque => RETOQUES.get(e.retoque).map_or("Retoque", |r| r.0),
++                _ => "Relleno",
++            };
++            let nombre = match h {
++                Herramienta::Texto => nombre_capa(prefijo, &e.texto),
++                Herramienta::QuitarObjeto | Herramienta::Retoque => nombre_capa(prefijo, ""),
++                _ => nombre_capa(prefijo, &e.prompt),
++            };
++            let envio = envio_modelo(&im, prompt(con_sel))?;
++            (Accion::Capa { zona: im.zona, mascara: if con_sel { z.selection } else { None }, nombre }, Some(envio), None)
++        }
++        Herramienta::Expandir => {
++            let (nw, nh) = lienzo_expandido(lienzo.width(), lienzo.height(), e.proporcion).ok_or("La imagen ya tiene esa proporción: elige otra.")?;
++            let (dx, dy) = (((nw - lienzo.width()) as f64 * 0.5).round() as i32, ((nh - lienzo.height()) as f64 * 0.5).round() as i32);
++            let nuevo = Rect::new(-dx, -dy, nw as i32 - dx, nh as i32 - dy);
++            let (s, aspecto) = ajustar_aspecto(nuevo, nuevo, &m.aspectos);
++            let suave = (lienzo.width().min(lienzo.height()) as i32 / 60).clamp(2, 48);
++            let px = vista(&d.doc, s, lienzo);
++            let mascara = mascara_expandir(s, lienzo, suave);
++            let envio = tamano_envio(s.width(), s.height());
++            let im = Imagen { zona: s, aspecto, envio, px: Some(px), mascara: Some(mascara) };
++            let envio = envio_modelo(&im, prompt(false))?;
++            (Accion::Expandir { ancho: nw, alto: nh, zona: s, nombre: nombre_capa("Expansión", &e.prompt) }, Some(envio), None)
++        }
++        Herramienta::QuitarFondo => {
++            let (rw, rh) = tamano_recorte(lienzo.width(), lienzo.height())?;
++            let px = vista(&d.doc, lienzo, lienzo);
++            let img = jpg(&cubrir(&px, lienzo.width(), lienzo.height(), rw, rh), rw, rh, "foto.jpg")?;
++            (Accion::SinFondo, Some(Envio::herramienta("quitar-fondo", img)), None)
++        }
++        Herramienta::GenerarFondo => {
++            let (rw, rh) = tamano_recorte(lienzo.width(), lienzo.height())?;
++            let px = vista(&d.doc, lienzo, lienzo);
++            let img = jpg(&cubrir(&px, lienzo.width(), lienzo.height(), rw, rh), rw, rh, "foto.jpg")?;
++            let (s, _) = ajustar_aspecto(lienzo, lienzo, &m.aspectos);
++            let (ew, eh) = tamano_envio(s.width(), s.height());
++            let px_s = if s == lienzo { px } else { vista(&d.doc, s, lienzo) };
++            let reducida = cubrir(&px_s, s.width(), s.height(), ew, eh);
++            (Accion::Fondo { zona: s, nombre: nombre_capa("Fondo", &e.prompt) }, Some(Envio::herramienta("quitar-fondo", img)), Some((reducida, ew, eh, s)))
++        }
++        Herramienta::MejorarResolucion => {
++            let f = e.factor();
++            if lienzo.width().max(lienzo.height()).saturating_mul(f) > MAX_LADO_AMPLIADO {
++                return Err(format!("La imagen ya es grande: ×{f} pasaría de {MAX_LADO_AMPLIADO} px."));
++            }
++            let px = vista(&d.doc, lienzo, lienzo);
++            // Topaz acepta hasta 10 MB: una foto muy detallada se reduce un poco antes de enviarla.
++            let (mut w, mut hh) = (lienzo.width(), lienzo.height());
++            let mut foto = jpg(&px, w, hh, "foto.jpg")?;
++            while foto.datos.len() as u64 > MAX_BYTES_AMPLIAR && w.max(hh) > 512 {
++                let (nw, nh) = caber(w, hh, w.max(hh) * 4 / 5);
++                foto = jpg(&cubrir(&px, lienzo.width(), lienzo.height(), nw, nh), nw, nh, "foto.jpg")?;
++                (w, hh) = (nw, nh);
++            }
++            let mut envio = Envio::herramienta("mejorar-resolucion", foto);
++            envio.factor = Some(f);
++            (Accion::Ampliar { nombre: format!("{nombre_doc} ×{f}") }, Some(envio), None)
++        }
++    };
++    let envio = envio.ok_or("Nada que enviar.")?;
++    let limite = if h == Herramienta::MejorarResolucion { 256 * MB } else { 64 * MB };
++    // Generar fondo, segundo paso: el fondo nuevo con la máscara del recorte.
++    let segundo = extra.map(|(px, ew, eh, s)| {
++        let prompt = prompt(false);
++        let modelo = m.id.clone();
++        let (aspecto, res) = (ajustar_aspecto(lienzo, lienzo, &m.aspectos).1, m.tiene_resoluciones().then(|| nivel(ew.max(eh))));
++        let refe = refe.clone();
++        move |alfa: &Img| -> Result<Envio, String> {
++            // El alfa del recorte cubre el lienzo; en la zona ajustada lo de fuera es fondo.
++            let (lw, lh) = (lienzo.width(), lienzo.height());
++            let sujeto = alfa_de(alfa, lw, lh);
++            let mut fondo = vec![255u8; s.width() as usize * s.height() as usize];
++            let sw = s.width() as usize;
++            for (i, v) in sujeto.iter().enumerate() {
++                let (x, y) = ((i % lw as usize) as i32 - s.x0, (i / lw as usize) as i32 - s.y0);
++                if let Some(o) = fondo.get_mut(y as usize * sw + x as usize) {
++                    *o = 255 - v;
++                }
++            }
++            let mut imagenes = vec![jpg(&px, ew, eh, "imagen.jpg")?, png_gris(escalar_gris(&fondo, s.width(), s.height(), ew, eh), ew, eh)?];
++            if let Some((p, rw, rh)) = &refe {
++                imagenes.push(jpg(p, *rw, *rh, "referencia.jpg")?);
++            }
++            Ok(Envio { modelo: modelo.clone(), prompt: prompt.clone(), tamano: Some((ew, eh)), aspecto, resolucion: res, factor: None, n, imagenes })
 +        }
 +    });
-+    Ok(Trabajo {
-+        doc: d.doc.id,
-+        zona: z.context,
-+        mascara: z.selection,
-+        nombre_capa: nombre_capa(&e.prompt),
-+        inicio: Instant::now(),
-+        etapa: "Preparando…",
-+        rx,
-+        listo: None,
-+    })
++    let rx = en_hilo(move |tx: Sender<Evento>| {
++        let r = (|| -> Result<Resultados, String> {
++            let (imagenes, fallidas) = red::generar(&conexion, envio, limite, &tx)?;
++            let Some(segundo) = segundo else { return Ok(Resultados { imagenes, alfa: None, fallidas }) };
++            let alfa = imagenes.into_iter().next().ok_or("La IA no separó al sujeto.")?;
++            let _ = tx.send(Evento::Etapa("Sujeto separado; creando el fondo…"));
++            let (imagenes, fallidas) = red::generar(&conexion, segundo(&alfa)?, limite, &tx)?;
++            Ok(Resultados { imagenes, alfa: Some(alfa), fallidas })
++        })();
++        let _ = tx.send(match r {
++            Ok(r) => Evento::Listo(r),
++            Err(m) => Evento::Error(m),
++        });
++    });
++    Ok(Trabajo { doc: d.doc.id, accion, inicio: Instant::now(), etapa: "Preparando…", rx, listo: None })
 +}
 +
 +/// Cada cuadro: recoge lo que llegó de la red y coloca el resultado en su documento.
@@ -783,6 +1729,12 @@ index 000000000..4446e574e
 +            Err(TryRecvError::Disconnected) => app.jacnex_ia.info_rx = None,
 +        }
 +    }
++    // Un resultado cuyo documento o capa ya no existen no se ofrece más.
++    if let Some(r) = &app.jacnex_ia.resultado
++        && !app.session.documents().iter().any(|d| d.doc.id == r.doc && d.doc.layer(r.capa).is_some())
++    {
++        app.jacnex_ia.resultado = None;
++    }
 +    let Some(t) = app.jacnex_ia.trabajo.as_mut() else { return };
 +    let mut fin: Option<Result<String, String>> = None;
 +    loop {
@@ -793,7 +1745,7 @@ index 000000000..4446e574e
 +                    i.creditos = s;
 +                }
 +            }
-+            Ok(Evento::Listo { rgba, ancho, alto }) => t.listo = Some((rgba, ancho, alto)),
++            Ok(Evento::Listo(r)) => t.listo = Some(r),
 +            Ok(Evento::Error(e)) => fin = Some(Err(e)),
 +            Err(TryRecvError::Empty) => break,
 +            Err(TryRecvError::Disconnected) => {
@@ -805,9 +1757,11 @@ index 000000000..4446e574e
 +        }
 +    }
 +    let doc = t.doc;
++    let ampliar = matches!(t.accion, Accion::Ampliar { .. });
 +    if fin.is_none() && t.listo.is_some() {
-+        // El resultado va a su documento: si ahora hay otro activo, espera a que vuelva.
-+        if app.session.active().is_some_and(|d| d.doc.id == doc) {
++        // El resultado va a su documento: si ahora hay otro activo, espera a que vuelva. Una
++        // ampliación abre su propio documento y no espera.
++        if ampliar || app.session.active().is_some_and(|d| d.doc.id == doc) {
 +            fin = Some(colocar(app));
 +        } else if !app.session.documents().iter().any(|d| d.doc.id == doc) {
 +            fin = Some(Err("El documento se cerró antes de recibir el resultado.".into()));
@@ -829,15 +1783,114 @@ index 000000000..4446e574e
 +
 +fn colocar(app: &mut PhotocraftApp) -> Result<String, String> {
 +    let Some(t) = app.jacnex_ia.trabajo.as_mut() else { return Err("Sin trabajo.".into()) };
-+    let Some((rgba, ancho, alto)) = t.listo.take() else { return Err("Sin resultado.".into()) };
-+    let (zona, mascara, nombre) = (t.zona, t.mascara.take(), t.nombre_capa.clone());
-+    let px = cubrir(&rgba, ancho, alto, zona.width(), zona.height());
-+    motor::place(&mut app.session, "Relleno generativo", &nombre, zona, &px, mascara.as_ref()).map_err(|e| e.to_string())?;
-+    Ok(if mascara.is_some() {
-+        "Listo: el resultado está en una capa nueva, recortada por tu selección. Ctrl+Z lo deshace; ocultando la capa comparas el antes y el después.".into()
-+    } else {
-+        "Listo: el resultado está en una capa nueva encima de tu imagen. Ctrl+Z lo deshace.".into()
-+    })
++    let Some(res) = t.listo.take() else { return Err("Sin resultado.".into()) };
++    let accion = std::mem::replace(&mut t.accion, Accion::SinFondo);
++    let doc = t.doc;
++    let fallidas = if res.fallidas > 0 { format!(" ({} variación no llegó; sus créditos se devolvieron.)", res.fallidas) } else { String::new() };
++    let lienzo = app.session.active().map(|d| d.doc.bounds()).ok_or("No hay documento.")?;
++    let err = |e: photocraft_engine::EngineError| e.to_string();
++    let varias = res.imagenes.len() > 1;
++    let pista_var = if varias { " Arriba en la ventana puedes cambiar de variación sin volver a pagar." } else { "" };
++    match accion {
++        Accion::Capa { zona, mascara, nombre } => {
++            let r = zona.intersect(&lienzo);
++            let vars: Vec<Vec<u8>> =
++                res.imagenes.iter().map(|i| recortar(&cubrir(&i.rgba, i.ancho, i.alto, zona.width(), zona.height()), zona, r, 4)).collect();
++            let primera = vars.first().ok_or("La IA no devolvió ninguna imagen.")?;
++            let capa = motor::place(&mut app.session, "Relleno generativo", &nombre, r, primera, mascara.as_ref()).map_err(err)?;
++            let con_mascara = mascara.is_some();
++            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: r, variaciones: vars, actual: 0, aplicable: true });
++            Ok(if con_mascara {
++                format!(
++                    "Listo: el resultado está en una capa nueva, recortada por tu selección. Ctrl+Z lo deshace; ocultando la capa comparas el antes y el después.{pista_var}{fallidas}"
++                )
++            } else {
++                format!("Listo: el resultado está en una capa nueva encima de tu imagen. Ctrl+Z lo deshace.{pista_var}{fallidas}")
++            })
++        }
++        Accion::Expandir { ancho, alto, zona, nombre } => {
++            let v = app
++                .run("image.canvasSize", serde_json::json!({"width": ancho, "height": alto, "anchor": "center", "extensionColor": "transparent"}))
++                .map_err(|e| format!("No se pudo agrandar el lienzo: {e}"))?;
++            let off = |i: usize| v.pointer(&format!("/offset/{i}")).and_then(|x| x.as_i64()).unwrap_or(0) as i32;
++            let (dx, dy) = (off(0), off(1));
++            let nuevo = Rect::new(0, 0, ancho as i32, alto as i32);
++            let zona_n = Rect::new(zona.x0 + dx, zona.y0 + dy, zona.x1 + dx, zona.y1 + dy);
++            let original = Rect::new(lienzo.x0 + dx, lienzo.y0 + dy, lienzo.x1 + dx, lienzo.y1 + dy);
++            let r = zona_n.intersect(&nuevo);
++            let suave = (lienzo.width().min(lienzo.height()) as i32 / 60).clamp(2, 48);
++            let mascara = motor::mask_from_gray(r, &mascara_expandir(r, original, suave)).ok_or("Máscara no válida.")?;
++            let vars: Vec<Vec<u8>> =
++                res.imagenes.iter().map(|i| recortar(&cubrir(&i.rgba, i.ancho, i.alto, zona_n.width(), zona_n.height()), zona_n, r, 4)).collect();
++            let primera = vars.first().ok_or("La IA no devolvió ninguna imagen.")?;
++            let capa = motor::place(&mut app.session, "Expansión generativa", &nombre, r, primera, Some(&mascara)).map_err(err)?;
++            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: r, variaciones: vars, actual: 0, aplicable: true });
++            Ok(format!(
++                "Listo: el lienzo ahora mide {ancho} × {alto} px y lo nuevo está en una capa. Ctrl+Z dos veces vuelve al tamaño anterior.{pista_var}{fallidas}"
++            ))
++        }
++        Accion::SinFondo => {
++            let img = res.imagenes.first().ok_or("La IA no devolvió el recorte.")?;
++            let (w, h) = (lienzo.width(), lienzo.height());
++            let mascara = motor::mask_from_gray(lienzo, &alfa_de(img, w, h)).ok_or("Máscara no válida.")?;
++            let d = app.session.active().ok_or("No hay documento.")?;
++            let px: Vec<u8> = motor::composite_rgba8(&d.doc, lienzo).into_iter().flatten().collect();
++            let capa = motor::place_alone(&mut app.session, "Quitar fondo", "IA · Sin fondo", lienzo, &px, &mascara).map_err(err)?;
++            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: lienzo, variaciones: Vec::new(), actual: 0, aplicable: false });
++            Ok("Listo: el sujeto está en una capa nueva con máscara y el resto quedó oculto (no borrado). Pinta la máscara para retocar el borde; vuelve a mostrar las otras capas o pulsa Ctrl+Z para recuperar el fondo.".into())
++        }
++        Accion::Fondo { zona, nombre } => {
++            let alfa = res.alfa.as_ref().ok_or("Falta el recorte del sujeto.")?;
++            let r = zona.intersect(&lienzo);
++            let fondo: Vec<u8> = alfa_de(alfa, lienzo.width(), lienzo.height()).into_iter().map(|v| 255 - v).collect();
++            let mascara = motor::mask_from_gray(lienzo, &fondo).ok_or("Máscara no válida.")?;
++            let vars: Vec<Vec<u8>> =
++                res.imagenes.iter().map(|i| recortar(&cubrir(&i.rgba, i.ancho, i.alto, zona.width(), zona.height()), zona, r, 4)).collect();
++            let primera = vars.first().ok_or("La IA no devolvió ninguna imagen.")?;
++            let capa = motor::place(&mut app.session, "Generar fondo", &nombre, r, primera, Some(&mascara)).map_err(err)?;
++            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: r, variaciones: vars, actual: 0, aplicable: true });
++            Ok(format!(
++                "Listo: el fondo nuevo está en una capa detrás del sujeto (su máscara protege al sujeto). Ctrl+Z lo deshace; pinta la máscara para retocar el borde.{pista_var}{fallidas}"
++            ))
++        }
++        Accion::Ampliar { nombre } => {
++            let img = res.imagenes.into_iter().next().ok_or("La IA no devolvió la imagen.")?;
++            motor::open_as_document(&mut app.session, &nombre, img.ancho, img.alto, &img.rgba).map_err(err)?;
++            app.jacnex_ia.resultado = None;
++            Ok(format!("Listo: «{nombre}» se abrió como documento nuevo ({} × {} px). Tu original no cambió.", img.ancho, img.alto))
++        }
++    }
++}
++
++/// Cambia la capa del último resultado a la variación `i` (un paso de historial, sin volver a pagar).
++pub fn cambiar_variacion(app: &mut PhotocraftApp, i: usize) {
++    let Some(r) = app.jacnex_ia.resultado.as_ref() else { return };
++    if i == r.actual || app.session.active().is_none_or(|d| d.doc.id != r.doc) {
++        return;
++    }
++    let Some(px) = r.variaciones.get(i) else { return };
++    match motor::replace_pixels(&mut app.session, "Cambiar variación", r.capa, r.zona, px) {
++        Ok(()) => {
++            if let Some(r) = app.jacnex_ia.resultado.as_mut() {
++                r.actual = i;
++            }
++        }
++        Err(e) => app.jacnex_ia.aviso = Some((false, e.to_string())),
++    }
++}
++
++/// Combina la capa del último resultado con la de abajo (Combinar hacia abajo).
++pub fn aplicar(app: &mut PhotocraftApp) {
++    let Some(r) = app.jacnex_ia.resultado.take() else { return };
++    if app.session.active().is_none_or(|d| d.doc.id != r.doc) {
++        app.jacnex_ia.resultado = Some(r);
++        return;
++    }
++    app.session.set_active_layer(Some(r.capa));
++    app.jacnex_ia.aviso = Some(match app.run("layer.mergeDown", serde_json::json!({})) {
++        Ok(_) => (true, "Aplicado: el resultado ya forma parte de la capa de abajo. Ctrl+Z lo separa de nuevo.".into()),
++        Err(e) => (false, format!("No se pudo aplicar: {e}")),
++    });
 +}
 +
 +// --- Ventana ----------------------------------------------------------------------------------
@@ -851,6 +1904,7 @@ index 000000000..4446e574e
 +}
 +
 +const ACENTO: Color32 = Color32::from_rgb(124, 92, 255);
++const ROJO: Color32 = Color32::from_rgb(230, 120, 90);
 +
 +fn boton_generar(ui: &mut egui::Ui, costo: Option<i64>, activo: bool) -> egui::Response {
 +    let texto = match costo {
@@ -867,7 +1921,26 @@ index 000000000..4446e574e
 +        let etapa = if t.listo.is_some() { "Listo: vuelve a su documento para colocarlo" } else { t.etapa };
 +        ui.label(format!("{etapa}  {s} s"));
 +    });
-+    ui.small("Suele tardar entre 10 y 30 segundos. Puedes seguir usando la app mientras tanto.");
++    ui.small("Suele tardar entre 10 y 40 segundos. Puedes seguir usando la app mientras tanto.");
++}
++
++fn ideas(ui: &mut egui::Ui, prompt: &mut String, lista: &[&str]) {
++    ui.horizontal_wrapped(|ui| {
++        ui.small("Ideas:");
++        for idea in lista {
++            if ui.small_button(*idea).clicked() {
++                *prompt = (*idea).to_string();
++            }
++        }
++    });
++}
++
++/// Lo que la ventana pidió hacer al terminar de dibujarse.
++#[derive(Default)]
++struct Pedidos {
++    generar: bool,
++    variacion: Option<usize>,
++    aplicar: bool,
 +}
 +
 +pub fn ventana(app: &mut PhotocraftApp, ctx: &egui::Context) {
@@ -876,22 +1949,24 @@ index 000000000..4446e574e
 +        return;
 +    }
 +    let mut abierta = true;
-+    let mut accion_generar = false;
++    let mut pide = Pedidos::default();
 +    let plan = plan(app);
 +    let sesion = app.jacnex_ia.con_sesion;
++    let activo = app.session.active().map(|d| d.doc.id);
++    let otros: Vec<(DocId, String)> = app.session.documents().iter().filter(|d| Some(d.doc.id) != activo).map(|d| (d.doc.id, d.doc.name.clone())).collect();
 +    egui::Window::new("IA de Jacnex")
 +        .id(egui::Id::unique("jacnex-ia-ventana"))
 +        .open(&mut abierta)
 +        .resizable(false)
 +        .collapsible(true)
-+        .default_width(340.0)
++        .default_width(360.0)
 +        .show(ctx, |ui| {
-+            ui.set_width(340.0);
++            ui.set_width(360.0);
 +            let e = &mut app.jacnex_ia;
 +            ui.horizontal(|ui| {
-+                ui.label(RichText::new(format!("Modelo: {MODELO_NOMBRE}")).strong());
++                ui.label(RichText::new("Photonex IA").strong());
 +                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-+                    if sesion && ui.small_button("Actualizar").on_hover_text("Actualizar saldo").clicked() {
++                    if sesion && ui.small_button("Actualizar").on_hover_text("Actualizar saldo y precios").clicked() {
 +                        pedir_info(e);
 +                    }
 +                    if let Some(i) = &e.info {
@@ -910,77 +1985,251 @@ index 000000000..4446e574e
 +                ui.small(format!("Cuenta: {}", i.nombre));
 +            }
 +            if let Some(err) = &e.info_error {
-+                ui.colored_label(Color32::from_rgb(230, 120, 90), err);
++                ui.colored_label(ROJO, err);
 +            }
 +            ui.separator();
 +            let Some(p) = plan.as_ref() else {
 +                ui.label("Abre o crea un documento para empezar.");
 +                return;
 +            };
-+            // Paso 1: qué va a cambiar.
-+            ui.label(RichText::new("1 · Dónde").strong());
-+            if p.con_seleccion {
-+                ui.label(format!(
-+                    "Relleno generativo en tu selección ({} × {} px). Solo cambia lo seleccionado; la IA mira también un poco alrededor para que encaje.",
-+                    p.zona.width(),
-+                    p.zona.height()
-+                ));
-+            } else {
-+                ui.label("No hay selección. Elige qué hacer (o selecciona una zona con el Marco o el Lazo):");
-+                ui.horizontal(|ui| {
-+                    ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::EditarTodo, "Editar toda la imagen");
-+                    ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::CrearNueva, "Crear imagen nueva");
-+                });
-+            }
-+            ui.add_space(4.0);
-+            // Paso 2: qué pedir.
-+            ui.label(RichText::new("2 · Qué quieres").strong());
-+            let pista = if p.con_seleccion { "Ej.: un perro durmiendo (vacío = quitar y rellenar)" } else { "Describe la imagen o el cambio" };
-+            ui.add(egui::TextEdit::multiline(&mut e.prompt).hint_text(pista).desired_rows(3).desired_width(f32::INFINITY));
-+            ui.horizontal_wrapped(|ui| {
-+                ui.small("Ideas:");
-+                let ideas = if p.con_seleccion { IDEAS_SELECCION } else { IDEAS_LIENZO };
-+                for idea in ideas {
-+                    if ui.small_button(*idea).clicked() {
-+                        e.prompt = if *idea == "quitar el objeto" { String::new() } else { (*idea).to_string() };
-+                    }
-+                }
-+            });
-+            ui.add_space(4.0);
-+            // Paso 3: generar.
-+            ui.label(RichText::new("3 · Generar").strong());
-+            match e.trabajo.as_ref() {
-+                Some(t) => progreso(ui, t),
-+                None => {
-+                    let falta_texto = !p.con_seleccion && e.prompt.trim().is_empty();
-+                    if boton_generar(ui, p.costo, !falta_texto).clicked() {
-+                        accion_generar = true;
-+                    }
-+                    if falta_texto {
-+                        ui.small("Escribe una indicación para continuar.");
-+                    }
-+                }
-+            }
-+            if let Some((ok, m)) = &e.aviso {
-+                ui.add_space(4.0);
-+                let color = if *ok { Color32::from_rgb(110, 200, 140) } else { Color32::from_rgb(230, 120, 90) };
-+                ui.colored_label(color, m);
-+            }
-+            ui.add_space(4.0);
-+            egui::CollapsingHeader::new("¿Cómo funciona?").id_salt("jacnex-ia-ayuda").show(ui, |ui| {
-+                ui.small("• Selecciona una zona (Marco, Lazo, Varita…) y escribe qué quieres ahí. Vacío = quitar lo que hay.");
-+                ui.small("• El resultado llega como capa nueva con máscara: puedes moverla, pintar la máscara o borrarla.");
-+                ui.small("• Sé concreto: «un gato naranja sentado» funciona mejor que «un gato».");
-+                ui.small("• Si algo falla, los créditos se devuelven automáticamente.");
-+                ui.small("• Truco: con una selección activa aparece la barra «Relleno generativo» debajo de ella.");
++            egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.75).auto_shrink([false, true]).show(ui, |ui| {
++                contenido_ventana(ui, e, p, &otros, &mut pide);
 +            });
 +        });
 +    if !abierta {
 +        app.jacnex_ia.abierta = false;
 +    }
-+    if accion_generar {
++    if let Some(i) = pide.variacion {
++        cambiar_variacion(app, i);
++    }
++    if pide.aplicar {
++        aplicar(app);
++    }
++    if pide.generar {
 +        generar(app);
 +    }
++}
++
++fn contenido_ventana(ui: &mut egui::Ui, e: &mut Estado, p: &Plan, otros: &[(DocId, String)], pide: &mut Pedidos) {
++    // Herramienta.
++    ui.label(RichText::new("Herramienta").strong());
++    egui::Grid::new("jacnex-ia-herramientas").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
++        for (i, h) in Herramienta::TODAS.iter().enumerate() {
++            let r = ui.add_sized([172.0, 22.0], egui::Button::selectable(e.herramienta == *h, h.nombre())).on_hover_text(h.ayuda());
++            if r.clicked() {
++                e.elegir_herramienta(*h);
++            }
++            if i % 2 == 1 {
++                ui.end_row();
++            }
++        }
++    });
++    let h = e.herramienta;
++    ui.small(h.ayuda());
++    ui.add_space(4.0);
++
++    // Modelo.
++    if h.usa_modelo() {
++        let actual = e.modelo_actual();
++        ui.horizontal(|ui| {
++            ui.label("Modelo:");
++            craft_ui::ComboBox::from_id_salt("jacnex-ia-modelo").width(230.0).selected_text(actual.nombre.clone()).show_ui(ui, |ui| {
++                for m in e.modelos() {
++                    let texto = match m.costo("1k") {
++                        Some(c) => format!("{} · desde {c}", m.nombre),
++                        None => m.nombre.clone(),
++                    };
++                    if ui.selectable_label(m.id == actual.id, texto).on_hover_text(m.descripcion.as_str()).clicked() {
++                        e.modelo = m.id.clone();
++                    }
++                }
++            });
++        });
++        if !actual.descripcion.is_empty() {
++            ui.small(actual.descripcion.as_str());
++        }
++        if h == Herramienta::Texto && actual.id != MODELO_TEXTO {
++            ui.small("Consejo: GPT Image 2 es el que mejor escribe texto.");
++        }
++        ui.add_space(4.0);
++    }
++
++    // Paso 1: dónde.
++    ui.label(RichText::new("1 · Dónde").strong());
++    match h {
++        Herramienta::Relleno if p.con_seleccion => {
++            ui.label(format!(
++                "En tu selección ({} × {} px). Solo cambia lo seleccionado; la IA mira también un poco alrededor para que encaje.",
++                p.zona.width(),
++                p.zona.height()
++            ));
++        }
++        Herramienta::Relleno => {
++            ui.label("No hay selección. Elige qué hacer (o selecciona una zona con el Marco o el Lazo):");
++            ui.horizontal(|ui| {
++                ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::EditarTodo, "Editar toda la imagen");
++                ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::CrearNueva, "Crear imagen nueva");
++            });
++        }
++        Herramienta::QuitarObjeto if p.con_seleccion => {
++            ui.label(format!("Se quitará lo seleccionado ({} × {} px). Selecciona con holgura, incluida su sombra.", p.zona.width(), p.zona.height()));
++        }
++        Herramienta::QuitarObjeto => {
++            ui.colored_label(ROJO, "Selecciona lo que quieres quitar (Marco, Lazo, Selección de objetos…), con un poco de margen.");
++        }
++        Herramienta::Texto if p.con_seleccion => {
++            ui.label("El texto irá dentro de tu selección.");
++        }
++        Herramienta::Texto => {
++            ui.label("Sin selección, la IA elige el mejor lugar. Para ubicarlo tú, selecciona la zona primero.");
++        }
++        Herramienta::Expandir => {
++            ui.label(format!("Tu imagen mide {} × {} px. Elige cómo agrandarla:", p.lienzo.width(), p.lienzo.height()));
++            ui.horizontal_wrapped(|ui| {
++                for pr in Proporcion::TODAS {
++                    ui.selectable_value(&mut e.proporcion, pr, pr.nombre());
++                }
++            });
++            if let Some((nw, nh)) = lienzo_expandido(p.lienzo.width(), p.lienzo.height(), e.proporcion) {
++                ui.small(format!("Quedará de {nw} × {nh} px; tu foto queda al centro, intacta."));
++            }
++        }
++        Herramienta::MejorarResolucion => {
++            ui.label(format!(
++                "Toda la imagen ({} × {} px), tal como se ve. Se abre como documento nuevo; tu original no cambia.",
++                p.lienzo.width(),
++                p.lienzo.height()
++            ));
++            ui.horizontal(|ui| {
++                ui.label("Aumento:");
++                for f in [2u32, 4] {
++                    let (w, hh) = (p.lienzo.width().saturating_mul(f), p.lienzo.height().saturating_mul(f));
++                    if ui.selectable_label(e.factor() == f, format!("×{f}  ({w} × {hh})")).clicked() {
++                        e.factor = f;
++                    }
++                }
++            });
++        }
++        _ => {
++            ui.label("Toda la imagen, tal como se ve (todas las capas visibles).");
++        }
++    }
++    ui.add_space(4.0);
++
++    // Paso 2: qué.
++    ui.label(RichText::new("2 · Qué quieres").strong());
++    match h {
++        Herramienta::Relleno => {
++            let pista = if p.con_seleccion { "Ej.: un perro durmiendo (vacío = quitar y rellenar)" } else { "Describe la imagen o el cambio" };
++            ui.add(egui::TextEdit::multiline(&mut e.prompt).hint_text(pista).desired_rows(3).desired_width(f32::INFINITY));
++            ideas(ui, &mut e.prompt, if p.con_seleccion { IDEAS_SELECCION } else { IDEAS_LIENZO });
++        }
++        Herramienta::QuitarObjeto => {
++            ui.label("Nada que escribir: la IA borra lo seleccionado y rellena con lo que habría detrás.");
++        }
++        Herramienta::Expandir => {
++            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Opcional: qué poner en lo nuevo").desired_width(f32::INFINITY));
++            ideas(ui, &mut e.prompt, IDEAS_EXPANDIR);
++        }
++        Herramienta::QuitarFondo => {
++            ui.label("Nada que escribir: la IA detecta a la persona u objeto principal.");
++        }
++        Herramienta::GenerarFondo => {
++            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Describe el fondo nuevo").desired_width(f32::INFINITY));
++            ideas(ui, &mut e.prompt, IDEAS_FONDO);
++        }
++        Herramienta::MejorarResolucion => {
++            ui.label("Nada que escribir. Ideal para fotos pequeñas, recortes o imágenes para imprimir.");
++        }
++        Herramienta::Texto => {
++            ui.add(egui::TextEdit::singleline(&mut e.texto).hint_text("El texto exacto, ej.: OFERTA 50%").desired_width(f32::INFINITY));
++            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Estilo (opcional): letras doradas en 3D, neón…").desired_width(f32::INFINITY));
++        }
++        Herramienta::Retoque => {
++            ui.horizontal_wrapped(|ui| {
++                for (i, (nombre, _)) in RETOQUES.iter().enumerate() {
++                    if ui.selectable_label(e.retoque == i, *nombre).clicked() {
++                        e.retoque = i;
++                    }
++                }
++            });
++            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Algo más (opcional)").desired_width(f32::INFINITY));
++        }
++    }
++    if h.admite_referencia() && !otros.is_empty() {
++        ui.horizontal(|ui| {
++            ui.label("Referencia:");
++            let nombre = e.referencia.and_then(|id| otros.iter().find(|o| o.0 == id)).map_or("Ninguna".to_string(), |o| o.1.clone());
++            craft_ui::ComboBox::from_id_salt("jacnex-ia-referencia").width(200.0).selected_text(nombre).show_ui(ui, |ui| {
++                ui.selectable_value(&mut e.referencia, None, "Ninguna");
++                for (id, n) in otros {
++                    ui.selectable_value(&mut e.referencia, Some(*id), n.as_str());
++                }
++            });
++        })
++        .response
++        .on_hover_text("Otro documento abierto (un producto, una persona, un estilo) que guía cómo se ve lo que la IA añade.");
++    }
++    ui.add_space(4.0);
++
++    // Paso 3: generar.
++    ui.label(RichText::new("3 · Generar").strong());
++    if h.admite_variaciones() {
++        ui.horizontal(|ui| {
++            ui.label("Variaciones:");
++            for n in 1..=3u32 {
++                if ui
++                    .selectable_label(e.variaciones() == n, n.to_string())
++                    .on_hover_text("Cada variación se cobra; luego eliges la que más te guste.")
++                    .clicked()
++                {
++                    e.variaciones = n;
++                }
++            }
++        });
++    }
++    match e.trabajo.as_ref() {
++        Some(t) => progreso(ui, t),
++        None => {
++            if boton_generar(ui, p.costo, p.falta.is_none()).clicked() {
++                pide.generar = true;
++            }
++            if let Some(f) = &p.falta {
++                ui.small(f.as_str());
++            }
++        }
++    }
++    if let Some((ok, m)) = &e.aviso {
++        ui.add_space(4.0);
++        ui.colored_label(if *ok { Color32::from_rgb(110, 200, 140) } else { ROJO }, m);
++    }
++
++    // El último resultado.
++    if let Some(r) = &e.resultado {
++        ui.add_space(4.0);
++        ui.horizontal(|ui| {
++            if r.variaciones.len() > 1 {
++                ui.label("Variación:");
++                for i in 0..r.variaciones.len() {
++                    if ui.selectable_label(r.actual == i, (i + 1).to_string()).clicked() {
++                        pide.variacion = Some(i);
++                    }
++                }
++            }
++            if r.aplicable && ui.button("Aplicar a la imagen").on_hover_text("Combina el resultado con la capa de abajo (Combinar hacia abajo).").clicked() {
++                pide.aplicar = true;
++            }
++        });
++    }
++    ui.add_space(4.0);
++    egui::CollapsingHeader::new("¿Cómo funciona?").id_salt("jacnex-ia-ayuda").show(ui, |ui| {
++        ui.small("• Cada resultado llega como capa nueva: puedes moverla, ocultarla, pintar su máscara o borrarla. Ctrl+Z la quita.");
++        ui.small("• «Aplicar a la imagen» la combina con la capa de abajo cuando ya te convence.");
++        ui.small("• Sé concreto: «un gato naranja sentado» funciona mejor que «un gato».");
++        ui.small("• Con 2 o 3 variaciones eliges la mejor sin volver a generar.");
++        ui.small("• Si algo falla, los créditos se devuelven automáticamente.");
++        ui.small("• Con una selección activa aparece la barra «Relleno generativo» debajo de ella.");
++    });
 +}
 +
 +// --- Barra contextual bajo la selección ---------------------------------------------------------
@@ -996,6 +2245,15 @@ index 000000000..4446e574e
 +        && app.session.active().is_some_and(|d| d.doc.selection.is_some())
 +}
 +
++/// Lo que se pidió desde la barra.
++enum Barra {
++    Nada,
++    Generar,
++    QuitarObjeto,
++    Variacion(usize),
++    Aplicar,
++}
++
 +/// Dibuja la barra bajo la selección del documento activo (desde la pasada de superposición del
 +/// lienzo, en la pestaña de ese documento).
 +pub fn barra(app: &mut PhotocraftApp, ui: &mut egui::Ui, xf: &ViewXform) {
@@ -1009,16 +2267,24 @@ index 000000000..4446e574e
 +    let anchor = egui::Rect::from_two_pos(a, b);
 +    let ctx = ui.ctx().clone();
 +    let mut place = app.ui.panels.task_bar;
-+    let costo = app.jacnex_ia.info.as_ref().map(|i| i.costo_edicion);
-+    let shown = task_bar::show(&ctx, &mut place, anchor, xf.rect, |ui, more| contenido(app, ui, more, costo));
++    let costo = if app.jacnex_ia.barra_expandida { plan(app).and_then(|p| p.costo) } else { None };
++    let doc = app.session.active().map(|d| d.doc.id);
++    let shown = task_bar::show(&ctx, &mut place, anchor, xf.rect, |ui, more| contenido_barra(app, ui, more, costo, doc));
 +    app.ui.panels.task_bar = place;
 +    let Some(shown) = shown else { return };
 +    if shown.hide {
 +        app.ui.panels.context_task_bar = false;
 +        return;
 +    }
-+    if shown.inner {
-+        generar(app);
++    match shown.inner {
++        Barra::Nada => {}
++        Barra::Generar => generar(app),
++        Barra::QuitarObjeto => {
++            app.jacnex_ia.elegir_herramienta(Herramienta::QuitarObjeto);
++            generar(app);
++        }
++        Barra::Variacion(i) => cambiar_variacion(app, i),
++        Barra::Aplicar => aplicar(app),
 +    }
 +}
 +
@@ -1037,40 +2303,62 @@ index 000000000..4446e574e
 +    }
 +}
 +
-+/// Devuelve si se pidió Generar.
-+fn contenido(app: &mut PhotocraftApp, ui: &mut egui::Ui, more: &mut task_bar::MoreMenu, costo: Option<i64>) -> bool {
-+    let mut pedir = false;
-+    if let Some(t) = app.jacnex_ia.trabajo.as_ref() {
++fn contenido_barra(app: &mut PhotocraftApp, ui: &mut egui::Ui, more: &mut task_bar::MoreMenu, costo: Option<i64>, doc: Option<DocId>) -> Barra {
++    let mut pedido = Barra::Nada;
++    let e = &mut app.jacnex_ia;
++    if let Some(t) = e.trabajo.as_ref() {
 +        ui.add(egui::Spinner::new());
 +        ui.label(format!("{}  {} s", t.etapa, t.inicio.elapsed().as_secs()));
-+    } else if !app.jacnex_ia.barra_expandida {
++    } else if !e.barra_expandida {
 +        if crate::icons::button_with_icon_size_tip(ui, "sparkles", task_bar::BUTTON, 14.0, false, "Relleno generativo", false).clicked()
 +            | ui.add(egui::Button::new("Relleno generativo").frame(false)).clicked()
 +        {
-+            app.jacnex_ia.barra_expandida = true;
-+            pedir_info(&mut app.jacnex_ia);
++            e.barra_expandida = true;
++            if !matches!(e.herramienta, Herramienta::Relleno | Herramienta::Texto) {
++                e.elegir_herramienta(Herramienta::Relleno);
++            }
++            pedir_info(e);
++        }
++        if ui.add(egui::Button::new("Quitar objeto").frame(false)).on_hover_text("Borra lo seleccionado y rellena con lo que habría detrás").clicked() {
++            pedir_info(e);
++            pedido = Barra::QuitarObjeto;
++        }
++        if let Some(r) = e.resultado.as_ref().filter(|r| Some(r.doc) == doc) {
++            if r.variaciones.len() > 1 {
++                ui.separator();
++                for i in 0..r.variaciones.len() {
++                    if ui.selectable_label(r.actual == i, (i + 1).to_string()).on_hover_text("Cambiar de variación").clicked() {
++                        pedido = Barra::Variacion(i);
++                    }
++                }
++            }
++            if r.aplicable && ui.small_button("Aplicar").on_hover_text("Combinar el resultado con la capa de abajo").clicked() {
++                pedido = Barra::Aplicar;
++            }
 +        }
 +    } else {
-+        let r = ui.add(
-+            egui::TextEdit::singleline(&mut app.jacnex_ia.prompt)
-+                .hint_text("Describe qué poner (vacío = quitar)")
-+                .desired_width(230.0),
-+        );
++        let r = ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Describe qué poner (vacío = quitar)").desired_width(230.0));
 +        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 +        if boton_generar(ui, costo, true).clicked() || enter {
-+            pedir = true;
++            if e.herramienta != Herramienta::Relleno {
++                e.elegir_herramienta(Herramienta::Relleno);
++            }
++            pedido = Barra::Generar;
 +        }
-+        if ui.small_button("?").on_hover_text("Abrir la ventana de la IA con explicaciones").clicked() {
-+            app.jacnex_ia.abierta = true;
++        if ui.small_button("?").on_hover_text("Abrir la ventana de la IA: modelos, variaciones y más herramientas").clicked() {
++            e.abierta = true;
++        }
++        if ui.small_button("×").on_hover_text("Cerrar").clicked() {
++            e.barra_expandida = false;
 +        }
 +    }
 +    more.show(ui);
-+    if let Some((false, m)) = &app.jacnex_ia.aviso
-+        && app.jacnex_ia.trabajo.is_none()
++    if let Some((false, m)) = &e.aviso
++        && e.trabajo.is_none()
 +    {
-+        ui.colored_label(Color32::from_rgb(230, 120, 90), "(!)").on_hover_text(m.as_str());
++        ui.colored_label(ROJO, "(!)").on_hover_text(m.as_str());
 +    }
-+    pedir
++    pedido
 +}
 +
 +#[cfg(test)]
@@ -1097,12 +2385,91 @@ index 000000000..4446e574e
 +        assert_eq!(tamano_envio(800, 600), (800, 600));
 +        assert_eq!(tamano_envio(4000, 2000), (1536, 768));
 +        assert_eq!(cubrir(&[0; 4 * 4000 * 10], 4000, 10, 400, 1).len(), 1600);
++        assert_eq!(tamano_recorte(100, 50).unwrap(), (512, 256), "Recraft needs 256 px");
++        assert_eq!(tamano_recorte(6000, 4000).unwrap(), (2048, 1365));
++        assert!(tamano_recorte(4000, 10).is_err());
++    }
++
++    #[test]
++    fn the_sent_area_takes_the_models_exact_proportion() {
++        let lienzo = Rect::new(0, 0, 400, 300);
++        let gemini: Vec<_> = GEMINI.split_whitespace().filter_map(aspecto).collect();
++        // 156×104 is 3:2 already.
++        let (r, a) = ajustar_aspecto(Rect::new(82, 88, 238, 192), lienzo, &gemini);
++        assert_eq!((r, a), (Rect::new(82, 88, 238, 192), Some((3, 2))));
++        // 100×100 near the right edge, a 16:9-only model: wider, shifted to stay inside.
++        let (r, a) = ajustar_aspecto(Rect::new(290, 10, 390, 110), lienzo, &[(16, 9)]);
++        assert_eq!(a, Some((16, 9)));
++        assert_eq!((r.width(), r.height()), (178, 100));
++        assert!(r.x1 <= 400 && r.x0 <= 290);
++        // Wider than the canvas: centred over it, past both edges.
++        let (r, _) = ajustar_aspecto(Rect::new(0, 0, 100, 300), Rect::new(0, 0, 100, 300), &[(16, 9)]);
++        assert_eq!((r.x0, r.x1, r.width()), (-216, 317, 533));
++        assert_eq!(ajustar_aspecto(lienzo, lienzo, &[]).0, lienzo);
++    }
++
++    #[test]
++    fn expanding_keeps_the_photo_and_marks_only_the_new_area() {
++        assert_eq!(lienzo_expandido(400, 300, Proporcion::Mas25), Some((500, 375)));
++        assert_eq!(lienzo_expandido(400, 300, Proporcion::Horizontal), Some((533, 300)));
++        assert_eq!(lienzo_expandido(400, 300, Proporcion::Historia), Some((400, 711)));
++        assert_eq!(lienzo_expandido(300, 300, Proporcion::Cuadrado), None);
++        let m = mascara_expandir(Rect::new(-10, 0, 30, 10), Rect::new(0, 0, 20, 10), 4);
++        let at = |x: i32, y: i32| m[(y * 40 + x + 10) as usize];
++        assert_eq!(at(-5, 5), 255, "new area");
++        assert_eq!(at(10, 5), 0, "the photo");
++        assert!(at(0, 5) > 128 && at(2, 5) < at(0, 5), "a soft seam inside the photo");
++        assert_eq!(at(10, 0), 0, "no seam on an edge without new area");
++    }
++
++    #[test]
++    fn crops_and_views_stay_in_bounds() {
++        let zona = Rect::new(-2, -2, 2, 2);
++        let px: Vec<u8> = (0..16).collect();
++        assert_eq!(recortar(&px, zona, Rect::new(0, 0, 2, 2), 1), vec![10, 11, 14, 15]);
++        assert_eq!(recortar(&px, zona, Rect::new(0, 0, 9, 9), 1).len(), 4);
++    }
++
++    #[test]
++    fn the_catalog_reads_prices_and_proportions() {
++        let v = serde_json::json!({"nombre": "Ana", "creditos": 50, "modelos": [
++            {"id": "nano-banana-2", "nombre": "Nano Banana 2", "proveedor": "Google", "tipo": "imagen", "aspectos": ["1:1", "16:9", "x"], "creditos": {"1k": 20, "2k": 30}},
++            {"id": "quitar-fondo", "nombre": "Quitar fondo", "proveedor": "Recraft", "tipo": "herramienta", "aspectos": [], "creditos": {"unica": 5}},
++            {"nombre": "sin id"}
++        ]});
++        let i = leer_info(&v);
++        assert_eq!((i.nombre.as_str(), i.creditos, i.modelos.len()), ("Ana", 50, 2));
++        let m = &i.modelos[0];
++        assert_eq!(m.nombre, "Google Nano Banana 2");
++        assert_eq!(m.aspectos, vec![(1, 1), (16, 9)]);
++        assert_eq!((m.costo("1k"), m.costo("2k")), (Some(20), Some(30)));
++        assert!(m.tiene_resoluciones());
++        assert_eq!(i.modelos[1].costo("unica"), Some(5));
++        assert_eq!(nivel(1200), "1k");
++        assert_eq!(nivel(1536), "2k");
++        let mut e = Estado { info: Some(i), ..Default::default() };
++        assert_eq!(e.modelos().len(), 1, "tools are not image models");
++        e.elegir_herramienta(Herramienta::Texto);
++        assert_eq!(e.modelo, MODELO_TEXTO);
++        e.elegir_herramienta(Herramienta::Relleno);
++        assert!(e.modelo.is_empty());
++        assert_eq!(Estado::default().modelo_actual().nombre, "Google Nano Banana");
++    }
++
++    #[test]
++    fn prompts_follow_the_tool() {
++        assert!(instrucciones(Herramienta::QuitarObjeto, "", "", true, SinSeleccion::EditarTodo, 0, false).contains("shadows"));
++        assert!(instrucciones(Herramienta::Relleno, "flores", "", true, SinSeleccion::EditarTodo, 0, false).contains("draw flores"));
++        assert_eq!(instrucciones(Herramienta::Relleno, "un gato", "", false, SinSeleccion::CrearNueva, 0, false), "un gato");
++        assert!(instrucciones(Herramienta::Texto, "", "OFERTA 50%", false, SinSeleccion::EditarTodo, 0, false).contains("\"OFERTA 50%\""));
++        assert!(instrucciones(Herramienta::Retoque, "", "", false, SinSeleccion::EditarTodo, 99, false).contains("lighting"));
++        assert!(instrucciones(Herramienta::GenerarFondo, "playa", "", false, SinSeleccion::EditarTodo, 0, true).contains("reference"));
 +    }
 +
 +    #[test]
 +    fn layer_names_are_short() {
-+        assert_eq!(nombre_capa("  "), "IA · Relleno");
-+        assert!(nombre_capa(&"a".repeat(80)).ends_with('…'));
++        assert_eq!(nombre_capa("Relleno", "  "), "IA · Relleno");
++        assert!(nombre_capa("Relleno", &"a".repeat(80)).ends_with('…'));
 +    }
 +
 +    #[test]
@@ -1175,18 +2542,20 @@ index e4bdc7a66..84669abaf 100644
          i if crate::links::url_for(i).is_some() => true,
 diff --git a/crates/ui-egui/tests/it/jacnex_ia.rs b/crates/ui-egui/tests/it/jacnex_ia.rs
 new file mode 100644
-index 000000000..137697780
+index 000000000..493fa1247
 --- /dev/null
 +++ b/crates/ui-egui/tests/it/jacnex_ia.rs
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,423 @@
 +//! Jacnex: la IA integrada (`jacnex_ia`). Con una selección, la barra contextual ofrece
 +//! «Relleno generativo»; Generar envía la zona y su máscara al servidor, y el resultado vuelve como
-+//! una capa nueva recortada por la selección (un solo paso de historial).
++//! una capa nueva recortada por la selección (un solo paso de historial). Las demás herramientas
++//! (variaciones, Quitar fondo, Generar fondo, Expandir, Mejorar resolución) se prueban igual.
 +//!
 +//! La app entera corre en un arnés de egui_kittest; el servidor es uno falso en 127.0.0.1 que
-+//! responde como /v1/jacnex de Forgenex. Con `JACNEX_IA_PRUEBA=<url>|<llave>` la misma prueba va
-+//! contra un Forgenex local de verdad (con kie.ai simulado).
++//! responde como /v1/jacnex de Forgenex. Con `JACNEX_IA_PRUEBA=<url>|<llave>` la prueba de la barra
++//! va contra un Forgenex local de verdad (con kie.ai simulado).
 +
++use std::collections::HashMap;
 +use std::io::{BufRead, BufReader, Read, Write};
 +use std::net::TcpListener;
 +use std::sync::{Arc, Mutex};
@@ -1197,11 +2566,15 @@ index 000000000..137697780
 +use photocraft_geom::Rect;
 +use photocraft_ui_egui::PhotocraftApp;
 +use photocraft_ui_egui::control::{ControlRequest, Outcome, handle};
++use photocraft_ui_egui::jacnex_ia::{self as ia, Herramienta, Proporcion};
 +use serde_json::{Value, json};
 +
 +type Harness = egui_kittest::Harness<'static, PhotocraftApp>;
 +
 +const ROJO: [u8; 4] = [220, 30, 40, 255];
++const VERDE: [u8; 4] = [30, 200, 60, 255];
++const AZUL: [u8; 4] = [30, 60, 220, 255];
++const BLANCO: [u8; 4] = [255, 255, 255, 255];
 +
 +fn harness() -> Harness {
 +    let mut h = Harness::builder().with_size(vec2(1100.0, 760.0)).with_max_steps(64).build_eframe(|cc| {
@@ -1225,34 +2598,55 @@ index 000000000..137697780
 +    v
 +}
 +
-+/// Lo que el servidor falso recibió.
++/// Lo que el servidor falso recibió: el cuerpo de cada /generar.
 +#[derive(Default)]
 +struct Recibido {
 +    generar: Vec<String>,
 +}
 +
-+fn png_rojo() -> Vec<u8> {
-+    let img = photocraft_codecs::Image::from_u8(64, 48, photocraft_codecs::ChannelLayout::Rgba, ROJO.repeat(64 * 48)).unwrap();
++fn png(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
++    let mut datos = Vec::with_capacity((w * h * 4) as usize);
++    for y in 0..h {
++        for x in 0..w {
++            datos.extend_from_slice(&px(x, y));
++        }
++    }
++    let img = photocraft_codecs::Image::from_u8(w, h, photocraft_codecs::ChannelLayout::Rgba, datos).unwrap();
 +    photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &photocraft_codecs::EncodeOptions::default()).unwrap()
 +}
 +
-+/// Un /v1/jacnex falso: estado, generar, trabajo (listo a la segunda consulta) y el PNG.
++/// Un campo de texto del formulario multipart.
++fn campo(cuerpo: &str, nombre: &str) -> Option<String> {
++    let marca = format!("name=\"{nombre}\"\r\n\r\n");
++    let ini = cuerpo.find(&marca)? + marca.len();
++    Some(cuerpo[ini..].split("\r\n").next()?.to_string())
++}
++
++/// Un /v1/jacnex falso: estado (catálogo), generar (un trabajo por variación), trabajo (listo a la
++/// segunda consulta) y las imágenes: un color por variación; Quitar fondo devuelve la mitad
++/// izquierda opaca; Mejorar resolución, el doble del lienzo de las pruebas.
 +fn servidor_falso() -> (String, Arc<Mutex<Recibido>>) {
 +    let l = TcpListener::bind("127.0.0.1:0").unwrap();
 +    let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
 +    let recibido = Arc::new(Mutex::new(Recibido::default()));
 +    let (r2, base2) = (recibido.clone(), base.clone());
 +    std::thread::spawn(move || {
-+        let mut consultas = 0;
++        // id → (resultado, consultas).
++        let mut trabajos: HashMap<String, (String, u32)> = HashMap::new();
++        let mut siguiente = 0;
 +        for s in l.incoming() {
 +            let Ok(mut s) = s else { continue };
 +            let mut lector = BufReader::new(s.try_clone().unwrap());
 +            let mut linea = String::new();
-+            lector.read_line(&mut linea).unwrap();
++            if lector.read_line(&mut linea).is_err() {
++                continue;
++            }
 +            let (mut largo, mut auth) = (0usize, String::new());
 +            loop {
 +                let mut h = String::new();
-+                lector.read_line(&mut h).unwrap();
++                if lector.read_line(&mut h).unwrap_or(0) == 0 {
++                    break;
++                }
 +                let h = h.trim_end();
 +                if h.is_empty() {
 +                    break;
@@ -1265,20 +2659,46 @@ index 000000000..137697780
 +                }
 +            }
 +            let mut cuerpo = vec![0; largo];
-+            lector.read_exact(&mut cuerpo).unwrap();
++            let _ = lector.read_exact(&mut cuerpo);
 +            let ruta = linea.split_whitespace().nth(1).unwrap_or("").to_string();
-+            let (estado, tipo, datos): (u16, &str, Vec<u8>) = if ruta == "/r.png" {
-+                (200, "image/png", png_rojo())
++            let (estado, tipo, datos): (u16, &str, Vec<u8>) = if let Some(r) = ruta.strip_prefix("/r/") {
++                let datos = match r {
++                    "quitar-fondo.png" => png(64, 48, |x, _| if x < 32 { [250, 250, 250, 255] } else { [0, 0, 0, 0] }),
++                    "mejorar-resolucion.png" => png(800, 600, |_, _| AZUL),
++                    "1.png" => png(64, 48, |_, _| VERDE),
++                    "2.png" => png(64, 48, |_, _| AZUL),
++                    _ => png(64, 48, |_, _| ROJO),
++                };
++                (200, "image/png", datos)
 +            } else if auth != "Bearer jk_prueba" {
 +                (401, "application/json", br#"{"error":{"message":"Llave no valida"}}"#.to_vec())
 +            } else if ruta.starts_with("/v1/jacnex/estado") {
-+                (200, "application/json", br#"{"nombre":"Prueba","creditos":100,"modelo":{"id":"nano-banana","costo":8,"costoEdicion":9}}"#.to_vec())
++                let gemini = ["1:1", "4:5", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9", "21:9"];
++                let v = json!({"nombre": "Prueba", "creditos": 100, "modelos": [
++                    {"id": "nano-banana", "nombre": "Nano Banana", "proveedor": "Google", "tipo": "imagen", "descripcion": "Económico", "aspectos": gemini, "creditos": {"unica": 9}},
++                    {"id": "gpt-image-2", "nombre": "GPT Image 2", "proveedor": "OpenAI", "tipo": "imagen", "descripcion": "Texto", "aspectos": ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"], "creditos": {"1k": 15, "2k": 25, "4k": 40}},
++                    {"id": "quitar-fondo", "nombre": "Quitar fondo", "proveedor": "Recraft", "tipo": "herramienta", "aspectos": [], "creditos": {"unica": 5}},
++                    {"id": "mejorar-resolucion", "nombre": "Mejorar resolución", "proveedor": "Topaz Labs", "tipo": "herramienta", "aspectos": [], "creditos": {"x2": 25, "x4": 50}}
++                ]});
++                (200, "application/json", v.to_string().into_bytes())
 +            } else if ruta == "/v1/jacnex/generar" {
-+                r2.lock().unwrap().generar.push(String::from_utf8_lossy(&cuerpo).into_owned());
-+                (201, "application/json", br#"{"id":"t1","creditos":9,"saldo":91}"#.to_vec())
-+            } else if ruta == "/v1/jacnex/trabajo/t1" {
-+                consultas += 1;
-+                let v = if consultas < 2 { json!({"id":"t1","estado":"procesando","resultados":[]}) } else { json!({"id":"t1","estado":"listo","resultados":[format!("{base2}/r.png")]}) };
++                let texto = String::from_utf8_lossy(&cuerpo).into_owned();
++                let modelo = campo(&texto, "model").unwrap_or_default();
++                let n: usize = campo(&texto, "n").and_then(|n| n.parse().ok()).unwrap_or(1);
++                r2.lock().unwrap().generar.push(texto);
++                let ids: Vec<String> = (0..n)
++                    .map(|i| {
++                        siguiente += 1;
++                        let id = format!("t{siguiente}");
++                        let archivo = if modelo == "quitar-fondo" || modelo == "mejorar-resolucion" { modelo.clone() } else { i.to_string() };
++                        trabajos.insert(id.clone(), (format!("{base2}/r/{archivo}.png"), 0));
++                        id
++                    })
++                    .collect();
++                (201, "application/json", json!({"id": ids[0], "ids": ids, "creditos": 9 * n, "saldo": 91}).to_string().into_bytes())
++            } else if let Some((url, consultas)) = ruta.strip_prefix("/v1/jacnex/trabajo/").and_then(|id| trabajos.get_mut(id)) {
++                *consultas += 1;
++                let v = if *consultas < 2 { json!({"estado": "procesando", "resultados": []}) } else { json!({"estado": "listo", "resultados": [url]}) };
 +                (200, "application/json", v.to_string().into_bytes())
 +            } else {
 +                (404, "application/json", br#"{"error":{"message":"no"}}"#.to_vec())
@@ -1295,9 +2715,31 @@ index 000000000..137697780
 +    photocraft_engine::jacnex_ia::composite_rgba8(&d.doc, Rect::new(x, y, x + 1, y + 1))[0]
 +}
 +
++/// Un arnés conectado al servidor falso.
++fn conectado() -> (Harness, Arc<Mutex<Recibido>>) {
++    let (servidor, recibido) = servidor_falso();
++    let mut h = harness();
++    assert!(ia::usar_servidor_local(h.state_mut(), &servidor, "jk_prueba"));
++    (h, recibido)
++}
++
++/// Pulsa Generar (por código) y espera a que el resultado se coloque.
++fn generar_y_esperar(h: &mut Harness) {
++    ia::generar(h.state_mut());
++    assert!(ia::ocupado(h.state()), "no empezó: {:?}", h.state().jacnex_ia.prompt);
++    let inicio = Instant::now();
++    while ia::hay_trabajo(h.state()) {
++        assert!(inicio.elapsed() < Duration::from_secs(60), "el resultado no llegó");
++        h.run_steps(2);
++        std::thread::sleep(Duration::from_millis(100));
++    }
++    h.run_steps(4);
++}
++
 +#[test]
 +fn generative_fill_from_the_selection_bar_lands_as_a_masked_layer() {
-+    let (servidor, llave, recibido) = match std::env::var("JACNEX_IA_PRUEBA").ok().and_then(|v| v.split_once('|').map(|(a, b)| (a.to_string(), b.to_string()))) {
++    let (servidor, llave, recibido) = match std::env::var("JACNEX_IA_PRUEBA").ok().and_then(|v| v.split_once('|').map(|(a, b)| (a.to_string(), b.to_string())))
++    {
 +        Some((s, l)) => (s, l, None),
 +        None => {
 +            let (s, r) = servidor_falso();
@@ -1305,13 +2747,14 @@ index 000000000..137697780
 +        }
 +    };
 +    let mut h = harness();
-+    assert!(photocraft_ui_egui::jacnex_ia::usar_servidor_local(h.state_mut(), &servidor, &llave));
-+    assert!(!photocraft_ui_egui::jacnex_ia::usar_servidor_local(h.state_mut(), "https://example.com", &llave), "solo esta máquina");
++    assert!(ia::usar_servidor_local(h.state_mut(), &servidor, &llave));
++    assert!(!ia::usar_servidor_local(h.state_mut(), "https://example.com", &llave), "solo esta máquina");
 +    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 120, "height": 80, "antiAlias": false})).unwrap();
 +    h.run_steps(4);
 +    let capas = h.state().session.active().unwrap().doc.layers.len();
 +
-+    // La barra bajo la selección: primero el botón, luego el campo y Generar.
++    // La barra bajo la selección: primero el botón (y Quitar objeto), luego el campo y Generar.
++    h.get_by_label("Quitar objeto");
 +    h.get_all_by_label("Relleno generativo").next().expect("la barra ofrece Relleno generativo").click();
 +    h.run_steps(4);
 +    h.state_mut().jacnex_ia.prompt = "flores rojas".into();
@@ -1328,7 +2771,7 @@ index 000000000..137697780
 +    h.get_all_by_label_contains("Generar").next().unwrap().click();
 +    let inicio = Instant::now();
 +    while h.state().session.active().unwrap().doc.layers.len() == capas {
-+        assert!(inicio.elapsed() < Duration::from_secs(60), "el resultado no llegó");
++        assert!(inicio.elapsed() < Duration::from_secs(60), "el resultado no llegó: {:?}", h.state().jacnex_ia_aviso());
 +        h.run_steps(2);
 +        std::thread::sleep(Duration::from_millis(100));
 +    }
@@ -1344,18 +2787,21 @@ index 000000000..137697780
 +    if recibido.is_some() {
 +        assert_eq!(pixel(app, 160, 140), ROJO, "dentro de la selección: el resultado");
 +    } else {
-+        assert_ne!(pixel(app, 160, 140), [255, 255, 255, 255], "dentro de la selección: el resultado");
++        assert_ne!(pixel(app, 160, 140), BLANCO, "dentro de la selección: el resultado");
 +    }
-+    assert_eq!(pixel(app, 90, 90), [255, 255, 255, 255], "fuera: la imagen de antes");
++    assert_eq!(pixel(app, 90, 90), BLANCO, "fuera: la imagen de antes");
 +    if let Some(r) = recibido {
 +        let r = r.lock().unwrap();
 +        assert_eq!(r.generar.len(), 1);
 +        let cuerpo = &r.generar[0];
-+        assert!(cuerpo.contains("name=\"model\"\r\n\r\nnano-banana\r\n"));
++        assert_eq!(campo(cuerpo, "model").as_deref(), Some("nano-banana"));
 +        assert!(cuerpo.contains("flores rojas"));
 +        assert_eq!(cuerpo.matches("name=\"image\"").count(), 2, "la zona y su máscara");
-+        // 120×80 más un 15 % a cada lado: 156×104 (dentro del lienzo).
-+        assert!(cuerpo.contains("name=\"size\"\r\n\r\n156x104\r\n"), "{}", &cuerpo[..cuerpo.len().min(600)]);
++        assert!(cuerpo.contains("Content-Type: image/jpeg"), "la foto va en JPEG");
++        // 120×80 más un 15 % a cada lado: 156×104 (dentro del lienzo), que ya es 3:2.
++        assert_eq!(campo(cuerpo, "size").as_deref(), Some("156x104"));
++        assert_eq!(campo(cuerpo, "aspect").as_deref(), Some("3:2"));
++        assert_eq!(campo(cuerpo, "n").as_deref(), Some("1"));
 +    }
 +
 +    // Un solo Ctrl+Z quita el resultado.
@@ -1364,10 +2810,135 @@ index 000000000..137697780
 +}
 +
 +#[test]
++fn three_variations_switch_without_paying_again_and_apply_merges_down() {
++    let (mut h, recibido) = conectado();
++    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 120, "height": 80, "antiAlias": false})).unwrap();
++    h.run_steps(4);
++    let capas = h.state().session.active().unwrap().doc.layers.len();
++    let e = &mut h.state_mut().jacnex_ia;
++    e.prompt = "un gato".into();
++    e.variaciones = 3;
++    generar_y_esperar(&mut h);
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas + 1, "{:?}", h.state().jacnex_ia_aviso());
++    assert_eq!(pixel(h.state(), 160, 140), ROJO, "la primera variación");
++    {
++        let r = recibido.lock().unwrap();
++        assert_eq!(r.generar.len(), 1, "un solo pedido");
++        assert_eq!(campo(&r.generar[0], "n").as_deref(), Some("3"));
++    }
++
++    ia::cambiar_variacion(h.state_mut(), 2);
++    h.run_steps(2);
++    assert_eq!(pixel(h.state(), 160, 140), AZUL, "la tercera");
++    ia::cambiar_variacion(h.state_mut(), 1);
++    assert_eq!(pixel(h.state(), 160, 140), VERDE, "la segunda");
++    assert_eq!(recibido.lock().unwrap().generar.len(), 1, "cambiar no vuelve a pedir");
++    assert_eq!(pixel(h.state(), 90, 90), BLANCO);
++
++    ia::aplicar(h.state_mut());
++    h.run_steps(2);
++    let d = h.state().session.active().unwrap();
++    assert_eq!(d.doc.layers.len(), capas, "combinada con la de abajo");
++    assert_eq!(pixel(h.state(), 160, 140), VERDE, "el resultado queda en la imagen");
++    assert_eq!(pixel(h.state(), 90, 90), BLANCO);
++}
++
++#[test]
++fn remove_background_masks_the_subject_and_hides_the_rest() {
++    let (mut h, recibido) = conectado();
++    let capas = h.state().session.active().unwrap().doc.layers.len();
++    h.state_mut().jacnex_ia.herramienta = Herramienta::QuitarFondo;
++    generar_y_esperar(&mut h);
++    let d = h.state().session.active().unwrap();
++    assert_eq!(d.doc.layers.len(), capas + 1, "{:?}", h.state().jacnex_ia_aviso());
++    let capa = d.doc.layer(d.active_layer.unwrap()).unwrap();
++    assert_eq!(capa.name, "IA · Sin fondo");
++    assert!(capa.mask.is_some());
++    assert_eq!(pixel(h.state(), 50, 150), BLANCO, "el sujeto (mitad izquierda) se ve");
++    assert_eq!(pixel(h.state(), 350, 150)[3], 0, "el fondo quedó transparente");
++    let r = recibido.lock().unwrap();
++    assert_eq!(campo(&r.generar[0], "model").as_deref(), Some("quitar-fondo"));
++    // 400×300 cumple los límites de Recraft: va a su tamaño, en JPEG.
++    assert_eq!(r.generar[0].matches("name=\"image\"").count(), 1);
++    drop(r);
++    h.state_mut().run("edit.undo", json!({})).unwrap();
++    assert_eq!(pixel(h.state(), 350, 150), BLANCO, "Ctrl+Z recupera el fondo");
++}
++
++#[test]
++fn generate_background_keeps_the_subject_and_paints_behind_it() {
++    let (mut h, recibido) = conectado();
++    let capas = h.state().session.active().unwrap().doc.layers.len();
++    let e = &mut h.state_mut().jacnex_ia;
++    e.herramienta = Herramienta::GenerarFondo;
++    e.prompt = "playa".into();
++    generar_y_esperar(&mut h);
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas + 1, "{:?}", h.state().jacnex_ia_aviso());
++    assert_eq!(pixel(h.state(), 50, 150), BLANCO, "el sujeto intacto");
++    assert_eq!(pixel(h.state(), 350, 150), ROJO, "el fondo nuevo");
++    let r = recibido.lock().unwrap();
++    assert_eq!(r.generar.len(), 2, "recorte y luego fondo");
++    assert_eq!(campo(&r.generar[0], "model").as_deref(), Some("quitar-fondo"));
++    assert_eq!(campo(&r.generar[1], "model").as_deref(), Some("nano-banana"));
++    assert!(r.generar[1].contains("playa"));
++    assert_eq!(r.generar[1].matches("name=\"image\"").count(), 2, "la foto y la máscara del fondo");
++}
++
++#[test]
++fn expanding_grows_the_canvas_and_fills_only_the_new_area() {
++    let (mut h, recibido) = conectado();
++    h.state_mut().jacnex_ia.herramienta = Herramienta::Expandir;
++    h.state_mut().jacnex_ia.proporcion = Proporcion::Horizontal;
++    generar_y_esperar(&mut h);
++    let b = h.state().session.active().unwrap().doc.bounds();
++    assert_eq!((b.width(), b.height()), (533, 300), "{:?}", h.state().jacnex_ia_aviso());
++    assert_eq!(pixel(h.state(), 5, 150), ROJO, "lo nuevo, a la izquierda");
++    assert_eq!(pixel(h.state(), 528, 150), ROJO, "lo nuevo, a la derecha");
++    assert_eq!(pixel(h.state(), 266, 150), BLANCO, "la foto original, intacta");
++    {
++        let r = recibido.lock().unwrap();
++        assert_eq!(campo(&r.generar[0], "aspect").as_deref(), Some("16:9"));
++        assert_eq!(campo(&r.generar[0], "size").as_deref(), Some("533x300"));
++    }
++    h.state_mut().run("edit.undo", json!({})).unwrap();
++    h.state_mut().run("edit.undo", json!({})).unwrap();
++    let b = h.state().session.active().unwrap().doc.bounds();
++    assert_eq!((b.width(), b.height()), (400, 300), "dos Ctrl+Z vuelven al tamaño de antes");
++}
++
++#[test]
++fn upscaling_opens_a_new_document_and_keeps_the_original() {
++    let (mut h, recibido) = conectado();
++    let docs = h.state().session.documents().len();
++    h.state_mut().jacnex_ia.herramienta = Herramienta::MejorarResolucion;
++    h.state_mut().jacnex_ia.factor = 2;
++    generar_y_esperar(&mut h);
++    let app = h.state();
++    assert_eq!(app.session.documents().len(), docs + 1, "{:?}", app.jacnex_ia_aviso());
++    let d = app.session.active().unwrap();
++    assert_eq!((d.doc.bounds().width(), d.doc.bounds().height()), (800, 600));
++    assert!(d.doc.name.ends_with("×2"), "{}", d.doc.name);
++    assert_eq!(pixel(app, 400, 300), AZUL);
++    let r = recibido.lock().unwrap();
++    assert_eq!(campo(&r.generar[0], "model").as_deref(), Some("mejorar-resolucion"));
++    assert_eq!(campo(&r.generar[0], "factor").as_deref(), Some("2"));
++}
++
++#[test]
++fn remove_object_needs_a_selection_and_costs_nothing_without_one() {
++    let (mut h, recibido) = conectado();
++    h.state_mut().jacnex_ia.herramienta = Herramienta::QuitarObjeto;
++    ia::generar(h.state_mut());
++    assert!(!ia::ocupado(h.state()));
++    assert!(h.state().jacnex_ia_aviso().is_some_and(|m| m.contains("selecciona")), "{:?}", h.state().jacnex_ia_aviso());
++    assert!(recibido.lock().unwrap().generar.is_empty());
++}
++
++#[test]
 +fn the_menu_opens_the_guided_window() {
 +    let mut h = harness();
 +    // Un servidor que no responde: la prueba no lee la sesión real de Jacnex Studio.
-+    assert!(photocraft_ui_egui::jacnex_ia::usar_servidor_local(h.state_mut(), "http://127.0.0.1:9", "jk_x"));
++    assert!(ia::usar_servidor_local(h.state_mut(), "http://127.0.0.1:9", "jk_x"));
 +    let item = photocraft_ui_egui::menus::menu_items(h.state()).into_iter().find(|i| i.id == "jacnex.ia").expect("en el menú");
 +    assert_eq!(item.path, vec!["Edit".to_string()]);
 +    assert!(item.enabled);
@@ -1376,8 +2947,27 @@ index 000000000..137697780
 +    h.run_steps(6);
 +    assert!(h.state().jacnex_ia.abierta);
 +    h.get_by_label_contains("IA de Jacnex");
-+    h.get_by_label_contains("Google Nano Banana");
++    // El modelo por defecto y su descripción, aunque el servidor no responda.
++    h.get_by_label_contains("El más económico de Google");
 +    h.get_by_label_contains("1 · Dónde");
++    for herramienta in ["Quitar fondo", "Expandir imagen", "Mejorar resolución", "Texto con IA", "Retoques en un clic", "Generar fondo"] {
++        h.get_by_label(herramienta);
++    }
++    // Cada herramienta se dibuja sin fallar.
++    for herramienta in Herramienta::TODAS {
++        h.state_mut().jacnex_ia.herramienta = herramienta;
++        h.run_steps(3);
++    }
++}
++
++trait Aviso {
++    fn jacnex_ia_aviso(&self) -> Option<String>;
++}
++
++impl Aviso for PhotocraftApp {
++    fn jacnex_ia_aviso(&self) -> Option<String> {
++        ia::aviso(self)
++    }
 +}
 diff --git a/crates/ui-egui/tests/it/main.rs b/crates/ui-egui/tests/it/main.rs
 index 8004bf5b7..b7ac7e199 100644
