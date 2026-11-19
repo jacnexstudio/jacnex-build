@@ -667,7 +667,7 @@ index cacef51..138458c 100644
  pub mod manifest;
  #[cfg(any(windows, test))]
 diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
-index 3fddd45..2563b6e 100644
+index 3fddd45..14cb23a 100644
 --- a/crates/ui-egui/src/app.rs
 +++ b/crates/ui-egui/src/app.rs
 @@ -68,6 +68,11 @@ pub trait Host {
@@ -699,7 +699,7 @@ index 3fddd45..2563b6e 100644
              pending_toasts: Vec::new(),
              pin_dragging: None,
          }
-@@ -327,11 +335,13 @@ impl LauncherUi {
+@@ -327,11 +335,14 @@ impl LauncherUi {
      }
  
      /// Input on its way to egui (the shell's `raw_input_hook`): with fewer animations asked for,
@@ -711,10 +711,11 @@ index 3fddd45..2563b6e 100644
              motion::unsmooth_wheel(ctx, raw);
          }
 +        crate::jacnex::teclado(ctx, raw, self.sin_sesion);
++        crate::jacnex::ventana_minima(ctx, raw);
      }
  
      /// Installed apps with an update waiting (the tray shows the count). Hidden apps are left out,
-@@ -355,9 +365,26 @@ impl LauncherUi {
+@@ -355,9 +366,26 @@ impl LauncherUi {
      }
  
      pub(crate) fn send(&mut self, command: Command) {
@@ -741,7 +742,7 @@ index 3fddd45..2563b6e 100644
      /// The toolbar's check button. The side effects run once, when the pass flushes.
      pub(crate) fn check_now_from_ui(&mut self) {
          self.act(UiAction::CheckNow);
-@@ -402,7 +429,11 @@ impl LauncherUi {
+@@ -402,7 +430,11 @@ impl LauncherUi {
                  continue;
              }
              match action {
@@ -754,7 +755,7 @@ index 3fddd45..2563b6e 100644
                  UiAction::Launch(id) => {
                      let flags = self.settings.launch_flags.get(id).map_or("", String::as_str);
                      // The dialog only saves flags that split, but the settings file can be edited by hand.
-@@ -510,6 +541,7 @@ impl LauncherUi {
+@@ -510,6 +542,7 @@ impl LauncherUi {
  
      /// Non-drawing work: runs every frame and also while the window is hidden in the tray.
      pub fn logic(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
@@ -762,7 +763,7 @@ index 3fddd45..2563b6e 100644
          // Messages made here (toasts, alerts) are drawn later, so use the language the UI can
          // actually show: English where the system has no CJK face for the preference.
          set_current(effective_lang(&self.settings.language));
-@@ -767,7 +799,7 @@ impl LauncherUi {
+@@ -767,7 +800,7 @@ impl LauncherUi {
          let to_update: Vec<(String, String)> = self
              .entries
              .iter()
@@ -771,7 +772,7 @@ index 3fddd45..2563b6e 100644
              .filter_map(|e| {
                  let v = e.latest_label()?;
                  if self.auto_update_attempted.contains(&(e.app.id.to_string(), v.clone())) { None } else { Some((e.app.id.to_string(), v)) }
-@@ -786,6 +818,12 @@ impl LauncherUi {
+@@ -786,6 +819,12 @@ impl LauncherUi {
                  self.send(Command::Install { app: id });
              }
          }
@@ -784,7 +785,7 @@ index 3fddd45..2563b6e 100644
          if self.caps.self_update
              && let Some(r) = &self.launcher_update
              && self.launcher_job.is_none()
-@@ -825,6 +863,7 @@ impl LauncherUi {
+@@ -825,6 +864,7 @@ impl LauncherUi {
  
      /// Draws the launcher.
      pub fn ui(&mut self, ui: &mut egui::Ui, host: &mut dyn Host) {
@@ -792,7 +793,7 @@ index 3fddd45..2563b6e 100644
          let ctx = ui.ctx().clone();
          self.begin_ui_frame(&ctx);
          if host.title_bar() == TitleBar::MacOs && ctx.input_mut(|i| i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::M)) {
-@@ -1170,6 +1209,24 @@ mod tests {
+@@ -1170,6 +1210,24 @@ mod tests {
          assert_eq!(drawable_lang("fr", Some(Lang::ZH_CN)), Lang::FR);
      }
  
@@ -818,7 +819,7 @@ index 3fddd45..2563b6e 100644
      /// Two controls queueing the same command in one pass are two gestures and must both reach the
      /// backend.
 diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
-index e9bc8a2..a95bab3 100644
+index e9bc8a2..be43154 100644
 --- a/crates/ui-egui/src/jacnex.rs
 +++ b/crates/ui-egui/src/jacnex.rs
 @@ -8,6 +8,7 @@ use egui::{
@@ -921,10 +922,43 @@ index e9bc8a2..a95bab3 100644
      }
  
      /// Apps with an update ready and nothing running.
-@@ -1429,3 +1461,56 @@ mod tests {
+@@ -1429,3 +1461,89 @@ mod tests {
          assert_eq!(url_forgenex("Café & sol\n", true), "https://jacnex.store/app?tipo=video&prompt=Caf%C3%A9%20%26%20sol");
      }
  }
++
++/// A window restored far below its minimum size goes back to its normal size, centred. Windows
++/// can save the geometry of a minimized window (160×64), and the launcher then opened as a strip
++/// with the logo and the header's buttons only. Never while minimized, maximized or full screen;
++/// at most once a second, so a system that refuses the size isn't asked every frame.
++pub fn ventana_minima(ctx: &egui::Context, raw: &egui::RawInput) {
++    const MINIMO: egui::Vec2 = egui::vec2(720.0, 500.0);
++    const NORMAL: egui::Vec2 = egui::vec2(1120.0, 760.0);
++    let Some(vista) = raw.viewports.get(&egui::ViewportId::ROOT) else { return };
++    if vista.minimized == Some(true) || vista.maximized == Some(true) || vista.fullscreen == Some(true) {
++        return;
++    }
++    let Some(dentro) = vista.inner_rect else { return };
++    if dentro.width() >= MINIMO.x * 0.9 && dentro.height() >= MINIMO.y * 0.9 {
++        return;
++    }
++    let ahora = raw.time.unwrap_or_default();
++    let id = egui::Id::unique("jx-ventana-minima");
++    if ctx.data(|d| d.get_temp::<f64>(id)).is_some_and(|t| ahora - t < 1.0) {
++        return;
++    }
++    ctx.data_mut(|d| d.insert_temp(id, ahora));
++    let tamano = match vista.monitor_size {
++        Some(pantalla) => NORMAL.min(pantalla * 0.9).max(MINIMO.min(pantalla)),
++        None => NORMAL,
++    };
++    log::info!("the window was {:?}, below its minimum size; restoring it to {tamano:?}", dentro.size());
++    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::InnerSize(tamano));
++    if let Some(pantalla) = vista.monitor_size {
++        let esquina = ((pantalla - tamano) * 0.5).max(egui::Vec2::ZERO);
++        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::OuterPosition(esquina.to_pos2()));
++    }
++}
 +
 +/// The keyboard on its way to egui (the shell's `raw_input_hook`, which also runs while the window
 +/// is minimized). On the sign-in screen there are no shortcuts, so typing the email can only write

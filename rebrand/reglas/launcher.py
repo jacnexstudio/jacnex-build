@@ -2,7 +2,7 @@
 
 import re
 
-from reglas import comunes
+from reglas import comunes, idioma
 from reglas.comunes import ErrorDeParche
 
 
@@ -58,6 +58,7 @@ def parches(carpeta, marca, parche):
     identidad_actualizador(carpeta, marca, parche)
     comunes.ajustar_instalador_windows(carpeta, "launcher")
     instalacion_como_adobe(carpeta, parche)
+    idioma.aplicar(carpeta, "launcher", parche)
 
 
 def identidad_actualizador(carpeta, marca, parche):

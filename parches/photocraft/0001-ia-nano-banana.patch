@@ -4014,10 +4014,10 @@ index e4bdc7a66..84669abaf 100644
          i if crate::links::url_for(i).is_some() => true,
 diff --git a/crates/ui-egui/tests/it/jacnex_ia.rs b/crates/ui-egui/tests/it/jacnex_ia.rs
 new file mode 100644
-index 000000000..2f587389c
+index 000000000..a052cd0c2
 --- /dev/null
 +++ b/crates/ui-egui/tests/it/jacnex_ia.rs
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,540 @@
 +//! Jacnex: la IA integrada (`jacnex_ia`). Con una selección, la barra contextual ofrece
 +//! «Relleno generativo»; Generar envía la zona y su máscara al servidor, y el resultado vuelve como
 +//! una capa nueva recortada por la selección (un solo paso de historial). Las demás herramientas
@@ -4054,7 +4054,9 @@ index 000000000..2f587389c
 +    let mut h = Harness::builder().with_size(vec2(1100.0, 760.0)).with_max_steps(64).build_eframe(|cc| {
 +        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
 +        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-+        app.session.prefs.edit(|p| p.interface.language = "en".into());
++        // JACNEX_IA_IDIOMA=auto: las capturas en el idioma predeterminado de Jacnex (español).
++        let idioma = std::env::var("JACNEX_IA_IDIOMA").unwrap_or_else(|_| "en".into());
++        app.session.prefs.edit(|p| p.interface.language = idioma);
 +        app.run("file.new", json!({"width": 400, "height": 300, "background": "white"})).expect("new");
 +        app
 +    });

@@ -77,6 +77,27 @@ jobs:
           ref: ${{ steps.version.outputs.ref }}
           path: src
 
+      # Photonex y Readnex no traen sus traducciones en el código: las leen al compilar de
+      # storytold/craft-i18n (en la versión de craft-i18n.rev), desde CRAFT_I18N_DIR. Sin esto solo
+      # tienen inglés. Va dentro de src y antes del cambio de marca para que los textos traducidos
+      # también digan Photonex, Readnex, Jacnex...
+      - name: Traducciones (craft-i18n)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path src/craft-i18n.rev)) { Write-Output 'Esta app trae sus traducciones en el código'; exit 0 }
+          $rev = (Get-Content src/craft-i18n.rev -Raw).Trim()
+          if ($rev -notmatch '^[0-9a-f]{40}$') { throw "craft-i18n.rev no es un commit: $rev" }
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'src/traducciones-jacnex'
+          git init -q $dir
+          git -C $dir fetch -q --depth 1 https://github.com/storytold/craft-i18n.git $rev
+          if ($LASTEXITCODE -ne 0) { throw "No se pudo descargar craft-i18n $rev" }
+          git -C $dir checkout -q FETCH_HEAD
+          Remove-Item -Recurse -Force (Join-Path $dir '.git')
+          if (-not (Test-Path (Join-Path $dir 'locales/es'))) { throw 'craft-i18n no tiene locales/es' }
+          "CRAFT_I18N_DIR=$dir" >> $env:GITHUB_ENV
+          "CRAFT_I18N_REQUIRED=1" >> $env:GITHUB_ENV
+          Write-Output "craft-i18n $rev en $dir"
+
       - name: Cambio de marca
         run: python -B jb/rebrand/rebrand.py ${{ inputs.proyecto }} src
 
