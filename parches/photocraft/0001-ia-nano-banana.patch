@@ -1139,10 +1139,10 @@ index 49053405f..83e830587 100644
          {
 diff --git a/crates/ui-egui/src/jacnex_ia.rs b/crates/ui-egui/src/jacnex_ia.rs
 new file mode 100644
-index 000000000..7d57eff1c
+index 000000000..99b5bb334
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_ia.rs
-@@ -0,0 +1,2420 @@
+@@ -0,0 +1,2808 @@
 +//! Jacnex: la IA integrada de Photonex.
 +//!
 +//! Ocho herramientas, explicadas paso a paso en la ventana «IA de Jacnex» (Edición › Relleno
@@ -1536,6 +1536,14 @@ index 000000000..7d57eff1c
 +    actual: usize,
 +    /// Se puede combinar con la capa de abajo (no un recorte, que oculta el resto).
 +    aplicable: bool,
++    /// «Otra vez» lo cambia por uno nuevo en el mismo lugar (no una expansión, que agrandaría el
++    /// lienzo de nuevo).
++    repetible: bool,
++    /// La herramienta que lo hizo.
++    herramienta: Herramienta,
++    /// La selección con que se hizo (sus límites en mosaicos): la barra ofrece elegir y aplicar
++    /// solo mientras siga siendo la misma.
++    sel: Option<Rect>,
 +}
 +
 +/// El estado de la IA en la app.
@@ -1579,6 +1587,8 @@ index 000000000..7d57eff1c
 +    /// Los límites de la selección para la barra, con lo que identifica esa selección: medirlos
 +    /// recorre sus píxeles, así que no se repite en cada cuadro.
 +    limites: Option<((DocId, u64, Rect), Option<Rect>)>,
++    /// Las miniaturas de las variaciones del último resultado (su documento y capa).
++    miniaturas: Option<((DocId, LayerId), Vec<egui::TextureHandle>)>,
 +}
 +
 +impl Estado {
@@ -2787,11 +2797,12 @@ index 000000000..7d57eff1c
 +    let Some(res) = t.listo.take() else { return Err("Sin resultado.".into()) };
 +    let accion = std::mem::replace(&mut t.accion, Accion::SinFondo);
 +    let doc = t.doc;
-+    let fallidas = if res.fallidas > 0 { format!(" ({} variación no llegó; sus créditos se devolvieron.)", res.fallidas) } else { String::new() };
++    let herramienta = app.jacnex_ia.herramienta;
++    let fallidas = if res.fallidas > 0 { format!(" {} no llegó; sus créditos volvieron.", res.fallidas) } else { String::new() };
 +    let lienzo = app.session.active().map(|d| d.doc.bounds()).ok_or("No hay documento.")?;
++    let sel = app.session.active().and_then(|d| d.doc.selection.as_ref().map(|s| s.tile_bounds()));
 +    let err = |e: photocraft_engine::EngineError| e.to_string();
-+    let varias = res.imagenes.len() > 1;
-+    let pista_var = if varias { " Arriba en la ventana puedes cambiar de variación sin volver a pagar." } else { "" };
++    let nuevo = |capa, zona, variaciones, aplicable, repetible| Resultado { doc, capa, zona, variaciones, actual: 0, aplicable, repetible, herramienta, sel };
 +    match accion {
 +        Accion::Capa { zona, mascara, nombre } => {
 +            let r = zona.intersect(&lienzo);
@@ -2799,15 +2810,8 @@ index 000000000..7d57eff1c
 +                res.imagenes.iter().map(|i| recortar(&cubrir(&i.rgba, i.ancho, i.alto, zona.width(), zona.height()), zona, r, 4)).collect();
 +            let primera = vars.first().ok_or("La IA no devolvió ninguna imagen.")?;
 +            let capa = motor::place(&mut app.session, "Relleno generativo", &nombre, r, primera, mascara.as_ref()).map_err(err)?;
-+            let con_mascara = mascara.is_some();
-+            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: r, variaciones: vars, actual: 0, aplicable: true });
-+            Ok(if con_mascara {
-+                format!(
-+                    "Listo: el resultado está en una capa nueva, recortada por tu selección. Ctrl+Z lo deshace; ocultando la capa comparas el antes y el después.{pista_var}{fallidas}"
-+                )
-+            } else {
-+                format!("Listo: el resultado está en una capa nueva encima de tu imagen. Ctrl+Z lo deshace.{pista_var}{fallidas}")
-+            })
++            app.jacnex_ia.resultado = Some(nuevo(capa, r, vars, true, true));
++            Ok(format!("Listo: está en una capa nueva.{fallidas}"))
 +        }
 +        Accion::Expandir { ancho, alto, zona, nombre } => {
 +            let v = app
@@ -2815,20 +2819,18 @@ index 000000000..7d57eff1c
 +                .map_err(|e| format!("No se pudo agrandar el lienzo: {e}"))?;
 +            let off = |i: usize| v.pointer(&format!("/offset/{i}")).and_then(|x| x.as_i64()).unwrap_or(0) as i32;
 +            let (dx, dy) = (off(0), off(1));
-+            let nuevo = Rect::new(0, 0, ancho as i32, alto as i32);
++            let lienzo_n = Rect::new(0, 0, ancho as i32, alto as i32);
 +            let zona_n = Rect::new(zona.x0 + dx, zona.y0 + dy, zona.x1 + dx, zona.y1 + dy);
 +            let original = Rect::new(lienzo.x0 + dx, lienzo.y0 + dy, lienzo.x1 + dx, lienzo.y1 + dy);
-+            let r = zona_n.intersect(&nuevo);
++            let r = zona_n.intersect(&lienzo_n);
 +            let suave = (lienzo.width().min(lienzo.height()) as i32 / 60).clamp(2, 48);
 +            let mascara = motor::mask_from_gray(r, &mascara_expandir(r, original, suave)).ok_or("Máscara no válida.")?;
 +            let vars: Vec<Vec<u8>> =
 +                res.imagenes.iter().map(|i| recortar(&cubrir(&i.rgba, i.ancho, i.alto, zona_n.width(), zona_n.height()), zona_n, r, 4)).collect();
 +            let primera = vars.first().ok_or("La IA no devolvió ninguna imagen.")?;
 +            let capa = motor::place(&mut app.session, "Expansión generativa", &nombre, r, primera, Some(&mascara)).map_err(err)?;
-+            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: r, variaciones: vars, actual: 0, aplicable: true });
-+            Ok(format!(
-+                "Listo: el lienzo ahora mide {ancho} × {alto} px y lo nuevo está en una capa. Ctrl+Z dos veces vuelve al tamaño anterior.{pista_var}{fallidas}"
-+            ))
++            app.jacnex_ia.resultado = Some(nuevo(capa, r, vars, true, false));
++            Ok(format!("Listo: ahora mide {ancho} × {alto} px.{fallidas}"))
 +        }
 +        Accion::SinFondo => {
 +            let img = res.imagenes.first().ok_or("La IA no devolvió el recorte.")?;
@@ -2837,8 +2839,8 @@ index 000000000..7d57eff1c
 +            let d = app.session.active().ok_or("No hay documento.")?;
 +            let px: Vec<u8> = motor::composite_rgba8(&d.doc, lienzo).into_iter().flatten().collect();
 +            let capa = motor::place_alone(&mut app.session, "Quitar fondo", "IA · Sin fondo", lienzo, &px, &mascara).map_err(err)?;
-+            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: lienzo, variaciones: Vec::new(), actual: 0, aplicable: false });
-+            Ok("Listo: el sujeto está en una capa nueva con máscara y el resto quedó oculto (no borrado). Pinta la máscara para retocar el borde; vuelve a mostrar las otras capas o pulsa Ctrl+Z para recuperar el fondo.".into())
++            app.jacnex_ia.resultado = Some(nuevo(capa, lienzo, Vec::new(), false, false));
++            Ok("Listo: el fondo quedó oculto con una máscara (no borrado).".into())
 +        }
 +        Accion::Fondo { zona, nombre } => {
 +            let alfa = res.alfa.as_ref().ok_or("Falta el recorte del sujeto.")?;
@@ -2849,16 +2851,14 @@ index 000000000..7d57eff1c
 +                res.imagenes.iter().map(|i| recortar(&cubrir(&i.rgba, i.ancho, i.alto, zona.width(), zona.height()), zona, r, 4)).collect();
 +            let primera = vars.first().ok_or("La IA no devolvió ninguna imagen.")?;
 +            let capa = motor::place(&mut app.session, "Generar fondo", &nombre, r, primera, Some(&mascara)).map_err(err)?;
-+            app.jacnex_ia.resultado = Some(Resultado { doc, capa, zona: r, variaciones: vars, actual: 0, aplicable: true });
-+            Ok(format!(
-+                "Listo: el fondo nuevo está en una capa detrás del sujeto (su máscara protege al sujeto). Ctrl+Z lo deshace; pinta la máscara para retocar el borde.{pista_var}{fallidas}"
-+            ))
++            app.jacnex_ia.resultado = Some(nuevo(capa, r, vars, true, true));
++            Ok(format!("Listo: fondo nuevo detrás del sujeto.{fallidas}"))
 +        }
 +        Accion::Ampliar { nombre } => {
 +            let img = res.imagenes.into_iter().next().ok_or("La IA no devolvió la imagen.")?;
 +            motor::open_as_document(&mut app.session, &nombre, img.ancho, img.alto, &img.rgba).map_err(err)?;
 +            app.jacnex_ia.resultado = None;
-+            Ok(format!("Listo: «{nombre}» se abrió como documento nuevo ({} × {} px). Tu original no cambió.", img.ancho, img.alto))
++            Ok(format!("Listo: «{nombre}» se abrió aparte ({} × {} px).", img.ancho, img.alto))
 +        }
 +    }
 +}
@@ -2889,9 +2889,59 @@ index 000000000..7d57eff1c
 +    }
 +    app.session.set_active_layer(Some(r.capa));
 +    app.jacnex_ia.aviso = Some(match app.run("layer.mergeDown", serde_json::json!({})) {
-+        Ok(_) => (true, "Aplicado: el resultado ya forma parte de la capa de abajo. Ctrl+Z lo separa de nuevo.".into()),
++        Ok(_) => (true, "Aplicado a la imagen.".into()),
 +        Err(e) => (false, format!("No se pudo aplicar: {e}")),
 +    });
++}
++
++/// Borra la capa del último resultado (Ctrl+Z la recupera).
++pub fn descartar(app: &mut PhotocraftApp) {
++    let Some(r) = app.jacnex_ia.resultado.take() else { return };
++    if app.session.active().is_none_or(|d| d.doc.id != r.doc) {
++        app.jacnex_ia.resultado = Some(r);
++        return;
++    }
++    app.session.set_active_layer(Some(r.capa));
++    app.jacnex_ia.aviso = match app.run("layer.delete", serde_json::json!({})) {
++        Ok(_) => None,
++        Err(e) => Some((false, format!("No se pudo descartar: {e}"))),
++    };
++}
++
++/// Los límites (en mosaicos) de la selección del documento activo.
++fn seleccion_actual(app: &PhotocraftApp) -> Option<Rect> {
++    app.session.active().and_then(|d| d.doc.selection.as_ref().map(|s| s.tile_bounds()))
++}
++
++/// El último resultado sigue en su capa sin aplicar, en el documento activo, con la misma
++/// herramienta y selección: lo que se genere ahora lo reemplaza.
++fn repetir(app: &PhotocraftApp) -> bool {
++    let doc = app.session.active().map(|d| d.doc.id);
++    let e = &app.jacnex_ia;
++    e.resultado.as_ref().is_some_and(|r| r.repetible && Some(r.doc) == doc && r.herramienta == e.herramienta && r.sel == seleccion_actual(app))
++}
++
++/// Genera; un resultado sin aplicar en el mismo lugar se cambia por el nuevo (se quita antes,
++/// para que la IA no lo vea; Ctrl+Z lo recupera).
++pub fn otra_vez(app: &mut PhotocraftApp) {
++    if app.jacnex_ia.trabajo.is_some() {
++        return;
++    }
++    if repetir(app) {
++        let Some(p) = plan(app) else { return };
++        if let Some(f) = p.falta {
++            app.jacnex_ia.aviso = Some((false, f));
++            return;
++        }
++        if let (Some(c), Some(i)) = (p.costo, app.jacnex_ia.info.as_ref())
++            && c > i.creditos
++        {
++            app.jacnex_ia.aviso = Some((false, format!("Te faltan {} para generar.", creditos(c - i.creditos))));
++            return;
++        }
++        descartar(app);
++    }
++    generar(app);
 +}
 +
 +// --- Ventana ----------------------------------------------------------------------------------
@@ -2905,36 +2955,205 @@ index 000000000..7d57eff1c
 +}
 +
 +const ACENTO: Color32 = Color32::from_rgb(124, 92, 255);
++const ACENTO_CLARO: Color32 = Color32::from_rgb(205, 191, 255);
 +const ROJO: Color32 = Color32::from_rgb(230, 120, 90);
++const VERDE: Color32 = Color32::from_rgb(110, 200, 140);
++const OSCURO: Color32 = Color32::from_rgb(23, 24, 28);
++const ANCHO: f32 = 330.0;
++/// El ancho de las etiquetas de Ajustes.
++const ETIQUETA: f32 = 86.0;
 +
-+fn boton_generar(ui: &mut egui::Ui, costo: Option<i64>, activo: bool) -> egui::Response {
-+    let texto = match costo {
-+        Some(0) => "Generar · gratis".to_string(),
-+        Some(c) => format!("Generar · {c} créditos"),
-+        None => "Generar".to_string(),
-+    };
-+    ui.add_enabled(activo, egui::Button::new(RichText::new(texto).strong().color(Color32::WHITE)).fill(ACENTO).min_size(egui::vec2(0.0, 30.0)))
++/// `1236` → `1 236`.
++fn miles(n: i64) -> String {
++    let s = n.unsigned_abs().to_string();
++    let mut out = String::new();
++    for (i, c) in s.chars().enumerate() {
++        if i > 0 && (s.len() - i).is_multiple_of(3) {
++            out.push(' ');
++        }
++        out.push(c);
++    }
++    if n < 0 { format!("-{out}") } else { out }
++}
++
++fn creditos(c: i64) -> String {
++    if c == 1 { "1 crédito".into() } else { format!("{} créditos", miles(c)) }
++}
++
++fn icono(h: Herramienta) -> &'static str {
++    match h {
++        Herramienta::Relleno => "sparkles",
++        Herramienta::QuitarObjeto => "eraser",
++        Herramienta::Expandir => "maximize-2",
++        Herramienta::QuitarFondo => "eraser-background",
++        Herramienta::GenerarFondo => "image",
++        Herramienta::MejorarResolucion => "zoom-in",
++        Herramienta::Texto => "text-cursor",
++        Herramienta::Retoque => "wand-sparkles",
++    }
++}
++
++fn texto_generar(costo: Option<i64>, otra: bool) -> String {
++    let base = if otra { "Generar otra vez" } else { "Generar" };
++    match costo {
++        Some(0) => format!("{base} · en tu PC"),
++        Some(c) => format!("{base} · {}", creditos(c)),
++        None => base.to_string(),
++    }
++}
++
++/// El botón principal, de color: ícono y texto centrados.
++fn boton_acento(ui: &mut egui::Ui, icono: &str, texto: &str, tam: egui::Vec2, activo: bool) -> egui::Response {
++    let b = egui::Button::new((
++        egui::Atom::grow(),
++        crate::icons::image(icono, 15.0, Color32::WHITE),
++        RichText::new(texto).strong().color(Color32::WHITE),
++        egui::Atom::grow(),
++    ))
++    .fill(ACENTO)
++    .corner_radius(8.0)
++    .min_size(tam);
++    ui.add_enabled(activo, b)
++}
++
++/// «Aplicar»: blanco, el siguiente paso obvio tras generar.
++fn boton_aplicar(ui: &mut egui::Ui, texto: &str, tam: egui::Vec2) -> egui::Response {
++    let b = egui::Button::new((egui::Atom::grow(), crate::icons::image("check", 14.0, OSCURO), RichText::new(texto).strong().color(OSCURO), egui::Atom::grow()))
++        .fill(Color32::WHITE)
++        .corner_radius(7.0)
++        .min_size(tam);
++    ui.add(b)
++}
++
++/// Un botón sin marco con ícono y texto.
++fn boton_plano(ui: &mut egui::Ui, icono: &str, texto: &str, tinte: Color32) -> egui::Response {
++    ui.add(egui::Button::new((crate::icons::image(icono, 14.0, tinte), texto)).frame(false).min_size(egui::vec2(0.0, task_bar::BUTTON)))
++}
++
++/// El título de una sección, en versalitas tenues.
++fn titulo(ui: &mut egui::Ui, texto: &str) -> egui::Response {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    ui.label(RichText::new(texto.to_uppercase()).size(10.5).strong().color(t.text_faint))
++}
++
++/// Un «?» que explica al pasar el mouse.
++fn ayuda(ui: &mut egui::Ui, texto: &str) -> egui::Response {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
++    let color = if resp.hovered() { t.text } else { t.text_faint };
++    ui.painter().circle_stroke(rect.center(), 7.0, egui::Stroke::new(1.0, color));
++    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(10.5), color);
++    resp.on_hover_text(texto)
++}
++
++/// Los créditos de la cuenta, en una píldora.
++fn pastilla(ui: &mut egui::Ui, texto: &str) -> egui::Response {
++    let galley = ui.painter().layout_no_wrap(texto.to_string(), egui::FontId::proportional(12.0), ACENTO_CLARO);
++    let (rect, resp) = ui.allocate_exact_size(galley.size() + egui::vec2(18.0, 8.0), egui::Sense::hover());
++    let p = ui.painter();
++    p.rect_filled(rect, rect.height() / 2.0, ACENTO.gamma_multiply(0.22));
++    p.rect_stroke(rect, rect.height() / 2.0, egui::Stroke::new(1.0, ACENTO.gamma_multiply(0.55)), egui::StrokeKind::Inside);
++    p.galley(rect.center() - galley.size() / 2.0, galley, ACENTO_CLARO);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, texto));
++    resp
++}
++
++/// Opciones del mismo ancho, una elegida. Devuelve la que se pulsó.
++fn segmentos(ui: &mut egui::Ui, opciones: &[String], elegida: usize) -> Option<usize> {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let mut pulsada = None;
++    egui::Frame::NONE.fill(t.field).stroke(egui::Stroke::new(1.0, t.field_border)).corner_radius(7.0).inner_margin(2).show(ui, |ui| {
++        ui.spacing_mut().item_spacing.x = 2.0;
++        let n = opciones.len().max(1) as f32;
++        let w = ((ui.available_width() - 2.0 * (n - 1.0)) / n).max(20.0);
++        ui.horizontal(|ui| {
++            for (i, o) in opciones.iter().enumerate() {
++                let on = i == elegida;
++                let texto = RichText::new(o.as_str()).color(if on { Color32::WHITE } else { t.text_dim });
++                let fondo = if on { ACENTO.gamma_multiply(0.55) } else { Color32::TRANSPARENT };
++                let b = egui::Button::new(texto).fill(fondo).frame_when_inactive(on).min_size(egui::vec2(w, 22.0)).corner_radius(5.0);
++                if ui.add(b).clicked() {
++                    pulsada = Some(i);
++                }
++            }
++        });
++    });
++    pulsada
++}
++
++/// Una fila de Ajustes: etiqueta a la izquierda, control a la derecha.
++fn fila<R>(ui: &mut egui::Ui, etiqueta: &str, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    ui.horizontal(|ui| {
++        ui.allocate_ui_with_layout(egui::vec2(ETIQUETA, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
++            ui.set_min_width(ETIQUETA);
++            ui.label(RichText::new(etiqueta).color(t.text_dim));
++        });
++        control(ui)
++    })
++    .inner
 +}
 +
 +fn progreso(ui: &mut egui::Ui, t: &Trabajo) {
++    let tk = crate::theme::Tokens::get(ui.ctx());
 +    ui.horizontal(|ui| {
-+        ui.add(egui::Spinner::new());
++        ui.add(egui::Spinner::new().color(ACENTO));
 +        let s = t.inicio.elapsed().as_secs();
-+        let etapa = if t.listo.is_some() { "Listo: vuelve a su documento para colocarlo" } else { t.etapa };
-+        ui.label(format!("{etapa}  {s} s"));
++        let etapa = if t.listo.is_some() { "Listo: vuelve a su documento" } else { t.etapa };
++        ui.label(RichText::new(format!("{etapa}  {s} s")).strong());
 +    });
-+    ui.small("Suele tardar entre 10 y 40 segundos. Puedes seguir usando la app mientras tanto.");
++    ui.label(RichText::new("Suele tardar 10–40 s. Puedes seguir trabajando.").small().color(tk.text_faint));
 +}
 +
++/// Ideas de un clic, para quien no sabe qué escribir.
 +fn ideas(ui: &mut egui::Ui, prompt: &mut String, lista: &[&str]) {
 +    ui.horizontal_wrapped(|ui| {
-+        ui.small("Ideas:");
-+        for idea in lista {
-+            if ui.small_button(*idea).clicked() {
++        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
++        for idea in lista.iter().take(3) {
++            if ui.small_button(format!("+ {idea}")).clicked() {
 +                *prompt = (*idea).to_string();
 +            }
 +        }
 +    });
++}
++
++/// `px` (`w`×`h`, RGBA) reducida a lo sumo a 200 px de lado.
++fn miniatura(px: &[u8], w: u32, h: u32) -> Option<egui::ColorImage> {
++    if w == 0 || h == 0 || px.len() < (w as usize) * (h as usize) * 4 {
++        return None;
++    }
++    let (tw, th) = caber(w, h, 200);
++    let mut out = Vec::with_capacity((tw * th * 4) as usize);
++    for y in 0..th {
++        let sy = (u64::from(y) * u64::from(h) / u64::from(th)) as usize;
++        for x in 0..tw {
++            let sx = (u64::from(x) * u64::from(w) / u64::from(tw)) as usize;
++            let i = (sy * w as usize + sx) * 4;
++            out.extend_from_slice(&px[i..i + 4]);
++        }
++    }
++    Some(egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &out))
++}
++
++/// Prepara las miniaturas del último resultado (una vez por resultado).
++fn preparar_miniaturas(app: &mut PhotocraftApp, ctx: &egui::Context) {
++    let e = &mut app.jacnex_ia;
++    let Some(r) = &e.resultado else {
++        e.miniaturas = None;
++        return;
++    };
++    let clave = (r.doc, r.capa);
++    if e.miniaturas.as_ref().is_some_and(|m| m.0 == clave) {
++        return;
++    }
++    let (w, h) = (r.zona.width(), r.zona.height());
++    let tex = r
++        .variaciones
++        .iter()
++        .enumerate()
++        .filter_map(|(i, px)| Some(ctx.load_texture(format!("jacnex-ia-variacion-{i}"), miniatura(px, w, h)?, egui::TextureOptions::LINEAR)))
++        .collect();
++    e.miniaturas = Some((clave, tex));
 +}
 +
 +/// Lo que la ventana pidió hacer al terminar de dibujarse.
@@ -2943,6 +3162,8 @@ index 000000000..7d57eff1c
 +    generar: bool,
 +    variacion: Option<usize>,
 +    aplicar: bool,
++    descartar: bool,
++    cerrar: bool,
 +}
 +
 +pub fn ventana(app: &mut PhotocraftApp, ctx: &egui::Context) {
@@ -2950,55 +3171,64 @@ index 000000000..7d57eff1c
 +    if !app.jacnex_ia.abierta {
 +        return;
 +    }
-+    let mut abierta = true;
 +    let mut pide = Pedidos::default();
 +    let plan = plan(app);
++    let repetir = repetir(app);
 +    let sesion = app.jacnex_ia.con_sesion;
 +    let activo = app.session.active().map(|d| d.doc.id);
 +    let otros: Vec<(DocId, String)> = app.session.documents().iter().filter(|d| Some(d.doc.id) != activo).map(|d| (d.doc.id, d.doc.name.clone())).collect();
++    preparar_miniaturas(app, ctx);
++    let alto = ctx.content_rect().height();
 +    egui::Window::new("IA de Jacnex")
 +        .id(egui::Id::unique("jacnex-ia-ventana"))
-+        .open(&mut abierta)
++        .title_bar(false)
 +        .resizable(false)
-+        .collapsible(true)
-+        .default_width(360.0)
++        .default_width(ANCHO)
 +        .show(ctx, |ui| {
-+            ui.set_width(360.0);
++            ui.set_width(ANCHO);
++            let t = crate::theme::Tokens::get(ui.ctx());
 +            let e = &mut app.jacnex_ia;
++            // Cabecera: nombre, saldo, actualizar y cerrar.
 +            ui.horizontal(|ui| {
-+                ui.label(RichText::new("Photonex IA").strong());
++                ui.add(crate::icons::image("sparkles", 16.0, ACENTO_CLARO));
++                ui.label(RichText::new("IA de Jacnex").strong().size(14.0).color(t.text));
 +                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-+                    if sesion && ui.small_button("Actualizar").on_hover_text("Actualizar saldo y precios").clicked() {
++                    if crate::icons::button(ui, "x", 22.0, false, "Cerrar").clicked() {
++                        pide.cerrar = true;
++                    }
++                    if sesion && crate::icons::button(ui, "rotate-cw", 22.0, false, "Actualizar saldo").clicked() {
 +                        pedir_info(e);
 +                    }
 +                    if let Some(i) = &e.info {
-+                        ui.label(RichText::new(format!("{} créditos", i.creditos)).color(ACENTO).strong());
++                        let r = pastilla(ui, &creditos(i.creditos));
++                        if !i.nombre.is_empty() {
++                            r.on_hover_text(format!("Cuenta: {}", i.nombre));
++                        }
 +                    }
 +                });
 +            });
 +            if !sesion {
-+                ui.separator();
-+                ui.label("Para usar la IA, abre Jacnex Studio e inicia sesión con tu cuenta. Tus créditos son los de app.jacnex.store.");
-+                ui.small("Sin sesión funciona «Quitar objeto» gratis, en tu PC.");
-+            }
-+            if let Some(i) = &e.info
-+                && !i.nombre.is_empty()
-+            {
-+                ui.small(format!("Cuenta: {}", i.nombre));
++                ui.label(RichText::new("Inicia sesión en Jacnex Studio para usar la IA.").small().color(t.text_dim));
 +            }
 +            if let Some(err) = &e.info_error {
-+                ui.colored_label(ROJO, err);
++                ui.label(RichText::new(err.as_str()).small().color(ROJO));
 +            }
-+            ui.separator();
++            ui.add_space(4.0);
++            crate::widgets::hairline(ui);
 +            let Some(p) = plan.as_ref() else {
-+                ui.label("Abre o crea un documento para empezar.");
++                ui.add_space(10.0);
++                ui.label(RichText::new("Abre o crea un documento para empezar.").color(t.text_dim));
++                ui.add_space(6.0);
 +                return;
 +            };
-+            egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.75).auto_shrink([false, true]).show(ui, |ui| {
-+                contenido_ventana(ui, e, p, &otros, &mut pide);
++            egui::ScrollArea::vertical().max_height(alto * 0.6).auto_shrink([false, true]).show(ui, |ui| {
++                cuerpo(ui, e, p, activo, &otros, &mut pide);
 +            });
++            crate::widgets::hairline(ui);
++            ui.add_space(6.0);
++            pie(ui, e, p, repetir, &mut pide);
 +        });
-+    if !abierta {
++    if pide.cerrar {
 +        app.jacnex_ia.abierta = false;
 +    }
 +    if let Some(i) = pide.variacion {
@@ -3007,69 +3237,304 @@ index 000000000..7d57eff1c
 +    if pide.aplicar {
 +        aplicar(app);
 +    }
++    if pide.descartar {
++        descartar(app);
++    }
 +    if pide.generar {
-+        generar(app);
++        otra_vez(app);
 +    }
 +}
 +
-+fn contenido_ventana(ui: &mut egui::Ui, e: &mut Estado, p: &Plan, otros: &[(DocId, String)], pide: &mut Pedidos) {
-+    // Herramienta.
-+    ui.label(RichText::new("Herramienta").strong());
-+    egui::Grid::new("jacnex-ia-herramientas").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
-+        for (i, h) in Herramienta::TODAS.iter().enumerate() {
-+            let r = ui.add_sized([172.0, 22.0], egui::Button::selectable(e.herramienta == *h, h.nombre())).on_hover_text(h.ayuda());
-+            if r.clicked() {
-+                e.elegir_herramienta(*h);
++fn cuerpo(ui: &mut egui::Ui, e: &mut Estado, p: &Plan, activo: Option<DocId>, otros: &[(DocId, String)], pide: &mut Pedidos) {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let ancho = ui.available_width();
++    let h = e.herramienta;
++    let ideogram = e.usa_ideogram(p.con_seleccion);
++
++    // Herramienta: un desplegable con su ícono.
++    ui.add_space(8.0);
++    titulo(ui, "Herramienta");
++    let id_ico = egui::IdSalt::new("jacnex-ia-herramienta-icono");
++    let r = egui::Button::new((
++        egui::Atom::custom(id_ico, egui::vec2(24.0, 24.0)),
++        RichText::new(h.nombre()).strong().color(t.text),
++        egui::Atom::grow(),
++        crate::icons::image("chevron-down", 14.0, t.text_dim),
++    ))
++    .min_size(egui::vec2(ancho, 36.0))
++    .corner_radius(8.0)
++    .atom_ui(ui);
++    if let Some(rect) = r.rect(id_ico) {
++        ui.painter().rect_filled(rect, 6.0, ACENTO);
++        crate::icons::paint(ui, rect, icono(h), 14.0, Color32::WHITE);
++    }
++    let resp = r.response.on_hover_text(h.ayuda());
++    egui::Popup::menu(&resp).width(ancho).show(|ui| {
++        for x in Herramienta::TODAS {
++            let b = egui::Button::selectable(e.herramienta == x, (crate::icons::image(icono(x), 15.0, t.icon), x.nombre())).min_size(egui::vec2(ancho - 12.0, 28.0));
++            if ui.add(b).on_hover_text(x.ayuda()).clicked() {
++                e.elegir_herramienta(x);
++            }
++        }
++    });
++    // Dónde actúa, en una línea.
++    let (lienzo_w, lienzo_h) = (p.lienzo.width(), p.lienzo.height());
++    let donde = match h {
++        Herramienta::Relleno | Herramienta::QuitarObjeto | Herramienta::Texto if p.con_seleccion => {
++            Some((true, format!("En tu selección · {} × {} px", p.zona.width(), p.zona.height())))
++        }
++        Herramienta::Texto => Some((true, "Donde quede mejor (o selecciona una zona)".to_string())),
++        Herramienta::Relleno | Herramienta::QuitarObjeto => None,
++        _ => Some((true, format!("Toda la imagen · {lienzo_w} × {lienzo_h} px"))),
++    };
++    match donde {
++        Some((ok, texto)) => {
++            ui.label(RichText::new(texto).small().color(if ok { t.text_faint } else { ROJO }));
++        }
++        None if h == Herramienta::QuitarObjeto => {}
++        None => {
++            ui.add_space(2.0);
++            let elegida = usize::from(e.sin_seleccion == SinSeleccion::CrearNueva);
++            match segmentos(ui, &["Editar la imagen".into(), "Crear una nueva".into()], elegida) {
++                Some(0) => e.sin_seleccion = SinSeleccion::EditarTodo,
++                Some(_) => e.sin_seleccion = SinSeleccion::CrearNueva,
++                None => {}
++            }
++        }
++    }
++    ui.add_space(8.0);
++
++    // Descripción: lo que se escribe, según la herramienta.
++    let consejos = "Sé concreto: «un gato naranja sentado» funciona mejor que «un gato».\nCada resultado llega como capa nueva: Ctrl+Z la quita.\nSi algo falla, tus créditos vuelven solos.";
++    let encabezado = |ui: &mut egui::Ui, nombre: &str| {
++        crate::widgets::hairline(ui);
++        ui.add_space(8.0);
++        ui.horizontal(|ui| {
++            titulo(ui, nombre);
++            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                ayuda(ui, &format!("{}\n\n{consejos}", h.ayuda()));
++            });
++        });
++    };
++    let linea = |ui: &mut egui::Ui, texto: &mut String, pista: &str| {
++        ui.add(egui::TextEdit::singleline(texto).hint_text(pista).desired_width(f32::INFINITY).margin(egui::vec2(8.0, 6.0)));
++    };
++    match h {
++        Herramienta::Relleno => {
++            encabezado(ui, "Descripción");
++            let pista = if p.con_seleccion { "Ej.: un bote de madera (vacío = quitar)" } else { "Describe la imagen o el cambio" };
++            ui.add(egui::TextEdit::multiline(&mut e.prompt).hint_text(pista).desired_rows(3).desired_width(f32::INFINITY).margin(egui::vec2(8.0, 6.0)));
++            ideas(ui, &mut e.prompt, if p.con_seleccion { IDEAS_SELECCION } else { IDEAS_LIENZO });
++        }
++        Herramienta::Expandir => {
++            encabezado(ui, "Descripción");
++            linea(ui, &mut e.prompt, "Opcional: qué poner en lo nuevo");
++            ideas(ui, &mut e.prompt, IDEAS_EXPANDIR);
++        }
++        Herramienta::GenerarFondo => {
++            encabezado(ui, "Descripción");
++            linea(ui, &mut e.prompt, "Describe el fondo nuevo");
++            ideas(ui, &mut e.prompt, IDEAS_FONDO);
++        }
++        Herramienta::Texto => {
++            encabezado(ui, "Texto");
++            linea(ui, &mut e.texto, "El texto exacto, ej.: OFERTA 50%");
++            ui.add_space(2.0);
++            linea(ui, &mut e.prompt, "Estilo (opcional): dorado en 3D, neón…");
++        }
++        Herramienta::Retoque => {
++            encabezado(ui, "Retoque");
++            ui.horizontal_wrapped(|ui| {
++                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
++                for (i, (nombre, _)) in RETOQUES.iter().enumerate() {
++                    if ui.selectable_label(e.retoque == i, *nombre).clicked() {
++                        e.retoque = i;
++                    }
++                }
++            });
++            ui.add_space(2.0);
++            linea(ui, &mut e.prompt, "Algo más (opcional)");
++        }
++        Herramienta::QuitarObjeto | Herramienta::QuitarFondo | Herramienta::MejorarResolucion => {}
++    }
++    if h.admite_referencia() && !ideogram {
++        ui.add_space(4.0);
++        let nombre = e.referencia.and_then(|id| otros.iter().find(|o| o.0 == id)).map(|o| o.1.clone());
++        let color = if nombre.is_some() { t.text } else { t.text_faint };
++        let texto = nombre.unwrap_or_else(|| "Imagen de referencia (opcional)".into());
++        let b = egui::Button::new((crate::icons::image("image", 14.0, color), RichText::new(texto).color(color), egui::Atom::grow()))
++            .min_size(egui::vec2(ancho, 30.0))
++            .corner_radius(8.0)
++            .fill(Color32::TRANSPARENT)
++            .stroke(egui::Stroke::new(1.0, t.field_border));
++        let resp = ui.add_enabled(!otros.is_empty(), b);
++        let resp = if otros.is_empty() {
++            resp.on_disabled_hover_text("Abre otra imagen en Photonex para usarla como referencia.")
++        } else {
++            resp.on_hover_text("Otra imagen abierta (un producto, una persona, un estilo) que guía cómo se ve lo nuevo.")
++        };
++        egui::Popup::menu(&resp).width(ancho).show(|ui| {
++            if ui.selectable_label(e.referencia.is_none(), "Ninguna").clicked() {
++                e.referencia = None;
++            }
++            for (id, n) in otros {
++                if ui.selectable_label(e.referencia == Some(*id), n.as_str()).clicked() {
++                    e.referencia = Some(*id);
++                }
++            }
++        });
++    }
++
++    // Ajustes.
++    let hay_ajustes = h.usa_modelo() || h == Herramienta::QuitarObjeto || h == Herramienta::MejorarResolucion || h == Herramienta::Expandir;
++    if hay_ajustes {
++        ui.add_space(8.0);
++        crate::widgets::hairline(ui);
++        ui.add_space(4.0);
++        let cabeza = RichText::new("AJUSTES").size(10.5).strong().color(t.text_faint);
++        egui::CollapsingHeader::new(cabeza).id_salt("jacnex-ia-ajustes").default_open(true).show_unindented(ui, |ui| {
++            ajustes(ui, e, p, ideogram);
++        });
++    }
++
++    // Resultados: las variaciones, para elegir y aplicar.
++    let Some(r) = e.resultado.as_ref().filter(|r| Some(r.doc) == activo && !r.variaciones.is_empty()) else { return };
++    let tex = e.miniaturas.as_ref().filter(|m| m.0 == (r.doc, r.capa)).map(|m| m.1.as_slice()).unwrap_or(&[]);
++    ui.add_space(8.0);
++    crate::widgets::hairline(ui);
++    ui.add_space(8.0);
++    ui.horizontal(|ui| {
++        let cabeza = titulo(ui, "Resultados");
++        // Al llegar un resultado nuevo, la lista se desplaza para mostrarlo.
++        let id = egui::Id::unique("jacnex-ia-resultados-vistos");
++        let clave = (r.doc, r.capa);
++        if ui.data(|d| d.get_temp::<(DocId, LayerId)>(id)) != Some(clave) {
++            cabeza.scroll_to_me(Some(egui::Align::Min));
++            ui.data_mut(|d| d.insert_temp(id, clave));
++        }
++        if r.variaciones.len() > 1 {
++            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                ui.label(RichText::new("Elige y aplica").small().color(t.text_faint));
++            });
++        }
++    });
++    let w = ((ancho - 8.0) / 2.0).floor();
++    let aspecto = r.zona.height() as f32 / r.zona.width().max(1) as f32;
++    let alto = (w * aspecto).clamp(48.0, 120.0);
++    egui::Grid::new("jacnex-ia-resultados").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
++        for (i, tx) in tex.iter().enumerate() {
++            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, alto), egui::Sense::click());
++            let pt = ui.painter();
++            pt.rect_filled(rect, 7.0, t.field);
++            // La imagen entera, centrada (sin deformar).
++            let tam = tx.size_vec2();
++            let f = (rect.width() / tam.x).min(rect.height() / tam.y);
++            let img = egui::Rect::from_center_size(rect.center(), tam * f);
++            egui::Image::from_texture(tx).corner_radius(6.0).paint_at(ui, img);
++            let elegida = r.actual == i;
++            if elegida {
++                pt.rect_stroke(rect.expand(1.0), 8.0, egui::Stroke::new(2.0, ACENTO), egui::StrokeKind::Outside);
++            } else if resp.hovered() {
++                pt.rect_stroke(rect, 7.0, egui::Stroke::new(1.0, t.text_faint), egui::StrokeKind::Outside);
++            }
++            let insignia = egui::Rect::from_min_size(rect.left_bottom() + egui::vec2(6.0, -24.0), egui::vec2(18.0, 18.0));
++            pt.rect_filled(insignia, 5.0, if elegida { ACENTO } else { Color32::from_black_alpha(180) });
++            pt.text(insignia.center(), egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(10.5), Color32::WHITE);
++            let nombre = format!("Variación {}", i + 1);
++            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, elegida, &nombre));
++            if resp.on_hover_text("Ver esta variación (sin volver a pagar)").clicked() {
++                pide.variacion = Some(i);
 +            }
 +            if i % 2 == 1 {
 +                ui.end_row();
 +            }
 +        }
 +    });
-+    let h = e.herramienta;
-+    ui.small(h.ayuda());
-+    ui.add_space(4.0);
-+
-+    // Modelo.
-+    let ideogram = e.usa_ideogram(p.con_seleccion);
-+    if h == Herramienta::QuitarObjeto {
++    if r.aplicable {
++        ui.add_space(6.0);
 +        ui.horizontal(|ui| {
-+            ui.label("Cómo:");
-+            ui.selectable_value(&mut e.motor_quitar, MotorQuitar::Local, "Gratis · en tu PC")
-+                .on_hover_text("MI-GAN, en tu computadora: sin conexión ni créditos. Ideal para cables, manchas, personas pequeñas y fondos sencillos.");
++            let mitad = ((ancho - 6.0) / 2.0).floor();
++            if boton_aplicar(ui, "Aplicar", egui::vec2(mitad, 30.0)).on_hover_text("Combina el resultado con la capa de abajo").clicked() {
++                pide.aplicar = true;
++            }
++            let b = egui::Button::new((egui::Atom::grow(), crate::icons::image("x", 14.0, t.text_dim), "Descartar", egui::Atom::grow()))
++                .min_size(egui::vec2(mitad, 30.0))
++                .corner_radius(7.0);
++            if ui.add(b).on_hover_text("Quita este resultado (Ctrl+Z lo recupera)").clicked() {
++                pide.descartar = true;
++            }
++        });
++    }
++    ui.add_space(4.0);
++}
++
++fn ajustes(ui: &mut egui::Ui, e: &mut Estado, p: &Plan, ideogram: bool) {
++    let h = e.herramienta;
++    ui.add_space(2.0);
++    if h == Herramienta::Expandir {
++        fila(ui, "Proporción", |ui| {
++            let actual = e.proporcion;
++            craft_ui::ComboBox::from_id_salt("jacnex-ia-proporcion").width(ui.available_width()).selected_text(actual.nombre()).show_ui(ui, |ui| {
++                for pr in Proporcion::TODAS {
++                    ui.selectable_value(&mut e.proporcion, pr, pr.nombre());
++                }
++            });
++        });
++        if let Some((nw, nh)) = lienzo_expandido(p.lienzo.width(), p.lienzo.height(), e.proporcion) {
++            fila(ui, "", |ui| ui.label(RichText::new(format!("Quedará de {nw} × {nh} px")).small()));
++        }
++    }
++    if h == Herramienta::MejorarResolucion {
++        fila(ui, "Aumento", |ui| {
++            let opciones: Vec<String> = [2u32, 4]
++                .iter()
++                .map(|f| format!("×{f} · {} × {}", p.lienzo.width().saturating_mul(*f), p.lienzo.height().saturating_mul(*f)))
++                .collect();
++            if let Some(i) = segmentos(ui, &opciones, usize::from(e.factor() == 4)) {
++                e.factor = if i == 1 { 4 } else { 2 };
++            }
++        });
++    }
++    if h == Herramienta::QuitarObjeto {
++        fila(ui, "Motor", |ui| {
 +            let ideo = match e.costo_ideogram() {
-+                Some(c) => format!("Con IA · Ideogram ({c} cr.)"),
-+                None => "Con IA · Ideogram".to_string(),
++                Some(c) => format!("Ideogram · {}", creditos(c)),
++                None => "Ideogram".to_string(),
 +            };
-+            ui.selectable_value(&mut e.motor_quitar, MotorQuitar::Ideogram, ideo)
-+                .on_hover_text("Ideogram 3.0, en la nube: mejor en zonas grandes o fondos complejos. Cobra créditos.");
++            let elegida = usize::from(e.motor_quitar == MotorQuitar::Ideogram);
++            match segmentos(ui, &["En tu PC".into(), ideo], elegida) {
++                Some(0) => e.motor_quitar = MotorQuitar::Local,
++                Some(_) => e.motor_quitar = MotorQuitar::Ideogram,
++                None => {}
++            }
 +        });
-+        ui.small(match e.motor_quitar {
-+            MotorQuitar::Local => "Gratis: se calcula en tu PC en unos segundos, sin internet ni cuenta.",
-+            MotorQuitar::Ideogram => "Ideogram 3.0 rellena con más detalle. Cada variación se cobra.",
-+        });
-+        ui.add_space(4.0);
++        let nota = match e.motor_quitar {
++            MotorQuitar::Local => "En segundos: cables, manchas, cosas pequeñas.",
++            MotorQuitar::Ideogram => "En la nube: zonas grandes o fondos complejos.",
++        };
++        fila(ui, "", |ui| ui.label(RichText::new(nota).small()));
 +    }
 +    if h.usa_modelo() {
 +        let actual = e.modelo_actual();
 +        let ofrece_ideogram = h == Herramienta::Relleno && p.con_seleccion;
 +        let costo_ideo = e.costo_ideogram();
 +        let elegido = if ideogram { "Ideogram 3.0".to_string() } else { actual.nombre.clone() };
-+        ui.horizontal(|ui| {
-+            ui.label("Modelo:");
-+            craft_ui::ComboBox::from_id_salt("jacnex-ia-modelo").width(230.0).selected_text(elegido).show_ui(ui, |ui| {
++        let pista = if ideogram { DESCRIPCION_IDEOGRAM.to_string() } else { actual.descripcion.clone() };
++        let modelos = e.modelos();
++        fila(ui, "Modelo", |ui| {
++            craft_ui::ComboBox::from_id_salt("jacnex-ia-modelo").width(ui.available_width()).selected_text(elegido).show_ui(ui, |ui| {
 +                if ofrece_ideogram {
 +                    let texto = match costo_ideo {
-+                        Some(c) => format!("Ideogram 3.0 · {c} (recomendado)"),
++                        Some(c) => format!("Ideogram 3.0 · {} (recomendado)", creditos(c)),
 +                        None => "Ideogram 3.0 (recomendado)".to_string(),
 +                    };
 +                    if ui.selectable_label(ideogram, texto).on_hover_text(DESCRIPCION_IDEOGRAM).clicked() {
 +                        e.modelo = IDEOGRAM.into();
 +                    }
 +                }
-+                for m in e.modelos() {
++                for m in &modelos {
 +                    let texto = match m.costo("1k") {
-+                        Some(c) => format!("{} · desde {c}", m.nombre),
++                        Some(c) => format!("{} · desde {}", m.nombre, creditos(c)),
 +                        None => m.nombre.clone(),
 +                    };
 +                    if ui.selectable_label(!ideogram && m.id == actual.id, texto).on_hover_text(m.descripcion.as_str()).clicked() {
@@ -3078,193 +3543,69 @@ index 000000000..7d57eff1c
 +                }
 +            });
 +        });
-+        if ideogram {
-+            ui.small(DESCRIPCION_IDEOGRAM);
-+        } else if !actual.descripcion.is_empty() {
-+            ui.small(actual.descripcion.as_str());
-+        }
-+        if h == Herramienta::Texto && actual.id != MODELO_TEXTO {
-+            ui.small("Consejo: GPT Image 2 es el que mejor escribe texto.");
-+        }
-+        ui.add_space(4.0);
-+    }
-+
-+    // Paso 1: dónde.
-+    ui.label(RichText::new("1 · Dónde").strong());
-+    match h {
-+        Herramienta::Relleno if p.con_seleccion => {
-+            ui.label(format!(
-+                "En tu selección ({} × {} px). Solo cambia lo seleccionado; la IA mira también un poco alrededor para que encaje.",
-+                p.zona.width(),
-+                p.zona.height()
-+            ));
-+        }
-+        Herramienta::Relleno => {
-+            ui.label("No hay selección. Elige qué hacer (o selecciona una zona con el Marco o el Lazo):");
-+            ui.horizontal(|ui| {
-+                ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::EditarTodo, "Editar toda la imagen");
-+                ui.selectable_value(&mut e.sin_seleccion, SinSeleccion::CrearNueva, "Crear imagen nueva");
-+            });
-+        }
-+        Herramienta::QuitarObjeto if p.con_seleccion => {
-+            ui.label(format!("Se quitará lo seleccionado ({} × {} px). Selecciona con holgura, incluida su sombra.", p.zona.width(), p.zona.height()));
-+        }
-+        Herramienta::QuitarObjeto => {
-+            ui.colored_label(ROJO, "Selecciona lo que quieres quitar (Marco, Lazo, Selección de objetos…), con un poco de margen.");
-+        }
-+        Herramienta::Texto if p.con_seleccion => {
-+            ui.label("El texto irá dentro de tu selección.");
-+        }
-+        Herramienta::Texto => {
-+            ui.label("Sin selección, la IA elige el mejor lugar. Para ubicarlo tú, selecciona la zona primero.");
-+        }
-+        Herramienta::Expandir => {
-+            ui.label(format!("Tu imagen mide {} × {} px. Elige cómo agrandarla:", p.lienzo.width(), p.lienzo.height()));
-+            ui.horizontal_wrapped(|ui| {
-+                for pr in Proporcion::TODAS {
-+                    ui.selectable_value(&mut e.proporcion, pr, pr.nombre());
-+                }
-+            });
-+            if let Some((nw, nh)) = lienzo_expandido(p.lienzo.width(), p.lienzo.height(), e.proporcion) {
-+                ui.small(format!("Quedará de {nw} × {nh} px; tu foto queda al centro, intacta."));
-+            }
-+        }
-+        Herramienta::MejorarResolucion => {
-+            ui.label(format!(
-+                "Toda la imagen ({} × {} px), tal como se ve. Se abre como documento nuevo; tu original no cambia.",
-+                p.lienzo.width(),
-+                p.lienzo.height()
-+            ));
-+            ui.horizontal(|ui| {
-+                ui.label("Aumento:");
-+                for f in [2u32, 4] {
-+                    let (w, hh) = (p.lienzo.width().saturating_mul(f), p.lienzo.height().saturating_mul(f));
-+                    if ui.selectable_label(e.factor() == f, format!("×{f}  ({w} × {hh})")).clicked() {
-+                        e.factor = f;
-+                    }
-+                }
-+            });
-+        }
-+        _ => {
-+            ui.label("Toda la imagen, tal como se ve (todas las capas visibles).");
++        if !pista.is_empty() {
++            let pista = if h == Herramienta::Texto { format!("{pista} GPT Image 2 es el que mejor escribe texto.") } else { pista };
++            fila(ui, "", |ui| ui.add(egui::Label::new(RichText::new(pista).small()).wrap()));
 +        }
 +    }
-+    ui.add_space(4.0);
-+
-+    // Paso 2: qué.
-+    ui.label(RichText::new("2 · Qué quieres").strong());
-+    match h {
-+        Herramienta::Relleno => {
-+            let pista = if p.con_seleccion { "Ej.: un perro durmiendo (vacío = quitar y rellenar)" } else { "Describe la imagen o el cambio" };
-+            ui.add(egui::TextEdit::multiline(&mut e.prompt).hint_text(pista).desired_rows(3).desired_width(f32::INFINITY));
-+            ideas(ui, &mut e.prompt, if p.con_seleccion { IDEAS_SELECCION } else { IDEAS_LIENZO });
-+        }
-+        Herramienta::QuitarObjeto => {
-+            ui.label("Nada que escribir: se borra lo seleccionado y se rellena con lo que habría detrás.");
-+        }
-+        Herramienta::Expandir => {
-+            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Opcional: qué poner en lo nuevo").desired_width(f32::INFINITY));
-+            ideas(ui, &mut e.prompt, IDEAS_EXPANDIR);
-+        }
-+        Herramienta::QuitarFondo => {
-+            ui.label("Nada que escribir: la IA detecta a la persona u objeto principal.");
-+        }
-+        Herramienta::GenerarFondo => {
-+            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Describe el fondo nuevo").desired_width(f32::INFINITY));
-+            ideas(ui, &mut e.prompt, IDEAS_FONDO);
-+        }
-+        Herramienta::MejorarResolucion => {
-+            ui.label("Nada que escribir. Ideal para fotos pequeñas, recortes o imágenes para imprimir.");
-+        }
-+        Herramienta::Texto => {
-+            ui.add(egui::TextEdit::singleline(&mut e.texto).hint_text("El texto exacto, ej.: OFERTA 50%").desired_width(f32::INFINITY));
-+            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Estilo (opcional): letras doradas en 3D, neón…").desired_width(f32::INFINITY));
-+        }
-+        Herramienta::Retoque => {
-+            ui.horizontal_wrapped(|ui| {
-+                for (i, (nombre, _)) in RETOQUES.iter().enumerate() {
-+                    if ui.selectable_label(e.retoque == i, *nombre).clicked() {
-+                        e.retoque = i;
-+                    }
-+                }
-+            });
-+            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Algo más (opcional)").desired_width(f32::INFINITY));
-+        }
-+    }
-+    if h.admite_referencia() && !ideogram && !otros.is_empty() {
-+        ui.horizontal(|ui| {
-+            ui.label("Referencia:");
-+            let nombre = e.referencia.and_then(|id| otros.iter().find(|o| o.0 == id)).map_or("Ninguna".to_string(), |o| o.1.clone());
-+            craft_ui::ComboBox::from_id_salt("jacnex-ia-referencia").width(200.0).selected_text(nombre).show_ui(ui, |ui| {
-+                ui.selectable_value(&mut e.referencia, None, "Ninguna");
-+                for (id, n) in otros {
-+                    ui.selectable_value(&mut e.referencia, Some(*id), n.as_str());
-+                }
-+            });
-+        })
-+        .response
-+        .on_hover_text("Otro documento abierto (un producto, una persona, un estilo) que guía cómo se ve lo que la IA añade.");
-+    }
-+    ui.add_space(4.0);
-+
-+    // Paso 3: generar.
-+    ui.label(RichText::new("3 · Generar").strong());
 +    if h.admite_variaciones() || ideogram {
-+        ui.horizontal(|ui| {
-+            ui.label("Variaciones:");
-+            for n in 1..=3u32 {
-+                if ui
-+                    .selectable_label(e.variaciones() == n, n.to_string())
-+                    .on_hover_text("Cada variación se cobra; luego eliges la que más te guste.")
-+                    .clicked()
-+                {
-+                    e.variaciones = n;
-+                }
++        fila(ui, "Variaciones", |ui| {
++            let opciones: Vec<String> = (1..=3).map(|n: u32| n.to_string()).collect();
++            if let Some(i) = segmentos(ui, &opciones, e.variaciones() as usize - 1) {
++                e.variaciones = i as u32 + 1;
 +            }
 +        });
 +    }
++    ui.add_space(4.0);
++}
++
++/// El pie fijo: lo que costará, lo que quedará y el botón.
++fn pie(ui: &mut egui::Ui, e: &mut Estado, p: &Plan, repetir: bool, pide: &mut Pedidos) {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let ancho = ui.available_width();
 +    match e.trabajo.as_ref() {
-+        Some(t) => progreso(ui, t),
++        Some(tr) => progreso(ui, tr),
 +        None => {
-+            if boton_generar(ui, p.costo, p.falta.is_none()).clicked() {
++            let h = e.herramienta;
++            let n = if h.admite_variaciones() || e.usa_ideogram(p.con_seleccion) { e.variaciones() } else { 1 };
++            if let Some(c) = p.costo {
++                ui.horizontal(|ui| {
++                    let izq = if c == 0 {
++                        "En tu PC · 0 créditos".to_string()
++                    } else if n > 1 {
++                        format!("{n} variaciones · {}", creditos(c))
++                    } else {
++                        creditos(c)
++                    };
++                    ui.label(RichText::new(izq).small().strong().color(ACENTO_CLARO));
++                    if let Some(i) = &e.info
++                        && c > 0
++                    {
++                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                            if i.creditos >= c {
++                                ui.label(RichText::new(format!("Te quedan {}", miles(i.creditos - c))).small().color(t.text_faint));
++                            } else {
++                                ui.label(RichText::new(format!("Te faltan {}", miles(c - i.creditos))).small().color(ROJO));
++                            }
++                        });
++                    }
++                });
++                ui.add_space(2.0);
++            }
++            let icono = if repetir { "rotate-cw" } else { "sparkles" };
++            if boton_acento(ui, icono, &texto_generar(p.costo, repetir), egui::vec2(ancho, 36.0), p.falta.is_none()).clicked() {
 +                pide.generar = true;
 +            }
 +            if let Some(f) = &p.falta {
-+                ui.small(f.as_str());
++                ui.label(RichText::new(f.as_str()).small().color(t.text_dim));
 +            }
 +        }
 +    }
 +    if let Some((ok, m)) = &e.aviso {
-+        ui.add_space(4.0);
-+        ui.colored_label(if *ok { Color32::from_rgb(110, 200, 140) } else { ROJO }, m);
++        ui.add_space(2.0);
++        ui.label(RichText::new(m.as_str()).small().color(if *ok { VERDE } else { ROJO }));
 +    }
-+
-+    // El último resultado.
-+    if let Some(r) = &e.resultado {
-+        ui.add_space(4.0);
-+        ui.horizontal(|ui| {
-+            if r.variaciones.len() > 1 {
-+                ui.label("Variación:");
-+                for i in 0..r.variaciones.len() {
-+                    if ui.selectable_label(r.actual == i, (i + 1).to_string()).clicked() {
-+                        pide.variacion = Some(i);
-+                    }
-+                }
-+            }
-+            if r.aplicable && ui.button("Aplicar a la imagen").on_hover_text("Combina el resultado con la capa de abajo (Combinar hacia abajo).").clicked() {
-+                pide.aplicar = true;
-+            }
-+        });
-+    }
-+    ui.add_space(4.0);
-+    egui::CollapsingHeader::new("¿Cómo funciona?").id_salt("jacnex-ia-ayuda").show(ui, |ui| {
-+        ui.small("• Cada resultado llega como capa nueva: puedes moverla, ocultarla, pintar su máscara o borrarla. Ctrl+Z la quita.");
-+        ui.small("• «Aplicar a la imagen» la combina con la capa de abajo cuando ya te convence.");
-+        ui.small("• Sé concreto: «un gato naranja sentado» funciona mejor que «un gato».");
-+        ui.small("• Con 2 o 3 variaciones eliges la mejor sin volver a generar.");
-+        ui.small("• Si algo falla, los créditos se devuelven automáticamente.");
-+        ui.small("• Con una selección activa aparece la barra «Relleno generativo» debajo de ella.");
-+    });
++    ui.add_space(2.0);
 +}
 +
 +// --- Barra contextual bajo la selección ---------------------------------------------------------
@@ -3287,6 +3628,18 @@ index 000000000..7d57eff1c
 +    QuitarObjeto,
 +    Variacion(usize),
 +    Aplicar,
++    OtraVez,
++    Descartar,
++}
++
++/// El último resultado, si la barra lo ofrece: en este documento, sin aplicar y con la misma
++/// selección. (variación actual, cuántas, se puede generar otra vez).
++fn resultado_en_barra(app: &PhotocraftApp) -> Option<(usize, usize, bool)> {
++    let doc = app.session.active().map(|d| d.doc.id);
++    let e = &app.jacnex_ia;
++    let r = e.resultado.as_ref().filter(|r| r.aplicable && Some(r.doc) == doc && r.sel == seleccion_actual(app))?;
++    let otra = r.repetible && r.herramienta == e.herramienta;
++    Some((r.actual, r.variaciones.len(), otra))
 +}
 +
 +/// Dibuja la barra bajo la selección del documento activo (desde la pasada de superposición del
@@ -3302,9 +3655,9 @@ index 000000000..7d57eff1c
 +    let anchor = egui::Rect::from_two_pos(a, b);
 +    let ctx = ui.ctx().clone();
 +    let mut place = app.ui.panels.task_bar;
-+    let costo = if app.jacnex_ia.barra_expandida { plan(app).and_then(|p| p.costo) } else { None };
-+    let doc = app.session.active().map(|d| d.doc.id);
-+    let shown = task_bar::show(&ctx, &mut place, anchor, xf.rect, |ui, more| contenido_barra(app, ui, more, costo, doc));
++    let resultado = if app.jacnex_ia.barra_expandida || app.jacnex_ia.trabajo.is_some() { None } else { resultado_en_barra(app) };
++    let costo = if app.jacnex_ia.barra_expandida || resultado.is_some_and(|r| r.2) { plan(app).and_then(|p| p.costo) } else { None };
++    let shown = task_bar::show(&ctx, &mut place, anchor, xf.rect, |ui, more| contenido_barra(app, ui, more, costo, resultado));
 +    app.ui.panels.task_bar = place;
 +    let Some(shown) = shown else { return };
 +    if shown.hide {
@@ -3313,13 +3666,20 @@ index 000000000..7d57eff1c
 +    }
 +    match shown.inner {
 +        Barra::Nada => {}
-+        Barra::Generar => generar(app),
++        Barra::Generar => {
++            otra_vez(app);
++            if app.jacnex_ia.trabajo.is_some() {
++                app.jacnex_ia.barra_expandida = false;
++            }
++        }
 +        Barra::QuitarObjeto => {
 +            app.jacnex_ia.elegir_herramienta(Herramienta::QuitarObjeto);
 +            generar(app);
 +        }
 +        Barra::Variacion(i) => cambiar_variacion(app, i),
 +        Barra::Aplicar => aplicar(app),
++        Barra::OtraVez => otra_vez(app),
++        Barra::Descartar => descartar(app),
 +    }
 +}
 +
@@ -3338,56 +3698,84 @@ index 000000000..7d57eff1c
 +    }
 +}
 +
-+fn contenido_barra(app: &mut PhotocraftApp, ui: &mut egui::Ui, more: &mut task_bar::MoreMenu, costo: Option<i64>, doc: Option<DocId>) -> Barra {
++fn contenido_barra(
++    app: &mut PhotocraftApp,
++    ui: &mut egui::Ui,
++    more: &mut task_bar::MoreMenu,
++    costo: Option<i64>,
++    resultado: Option<(usize, usize, bool)>,
++) -> Barra {
 +    let mut pedido = Barra::Nada;
++    let t = crate::theme::Tokens::get(ui.ctx());
 +    let e = &mut app.jacnex_ia;
-+    if let Some(t) = e.trabajo.as_ref() {
-+        ui.add(egui::Spinner::new());
-+        ui.label(format!("{}  {} s", t.etapa, t.inicio.elapsed().as_secs()));
++    if let Some(tr) = e.trabajo.as_ref() {
++        ui.add(egui::Spinner::new().color(ACENTO));
++        ui.label(format!("{}  {} s", tr.etapa, tr.inicio.elapsed().as_secs()));
++    } else if let Some((actual, total, otra)) = resultado {
++        // Después de generar: elegir la variación y aplicar, sin ir al panel.
++        if total > 1 {
++            ui.add_enabled_ui(actual > 0, |ui| {
++                if crate::icons::button(ui, "chevron-left", task_bar::BUTTON, false, "Variación anterior").clicked() {
++                    pedido = Barra::Variacion(actual - 1);
++                }
++            });
++            ui.label(RichText::new(format!("{} / {total}", actual + 1)).strong().color(t.text));
++            ui.add_enabled_ui(actual + 1 < total, |ui| {
++                if crate::icons::button(ui, "chevron-right", task_bar::BUTTON, false, "Variación siguiente").clicked() {
++                    pedido = Barra::Variacion(actual + 1);
++                }
++            });
++            crate::widgets::vline(ui, 18.0);
++        }
++        if boton_aplicar(ui, "Aplicar", egui::vec2(0.0, task_bar::BUTTON)).on_hover_text("Combina el resultado con la capa de abajo").clicked() {
++            pedido = Barra::Aplicar;
++        }
++        if otra {
++            let tip = match costo {
++                Some(c) if c > 0 => format!("Generar de nuevo · {}", creditos(c)),
++                _ => "Generar de nuevo".to_string(),
++            };
++            if boton_plano(ui, "rotate-cw", "Otra vez", t.icon).on_hover_text(tip).clicked() {
++                pedido = Barra::OtraVez;
++            }
++        }
++        if boton_plano(ui, "x", "Descartar", t.icon).on_hover_text("Quita este resultado (Ctrl+Z lo recupera)").clicked() {
++            pedido = Barra::Descartar;
++        }
 +    } else if !e.barra_expandida {
-+        if crate::icons::button_with_icon_size_tip(ui, "sparkles", task_bar::BUTTON, 14.0, false, "Relleno generativo", false).clicked()
-+            | ui.add(egui::Button::new("Relleno generativo").frame(false)).clicked()
-+        {
++        if boton_plano(ui, "sparkles", "Relleno generativo", ACENTO_CLARO).on_hover_text("Añade o cambia algo en tu selección con IA").clicked() {
 +            e.barra_expandida = true;
 +            if !matches!(e.herramienta, Herramienta::Relleno | Herramienta::Texto) {
 +                e.elegir_herramienta(Herramienta::Relleno);
 +            }
 +            pedir_info(e);
 +        }
-+        let ayuda = match e.motor_quitar {
-+            MotorQuitar::Local => "Gratis, en tu PC: borra lo seleccionado y rellena con lo de alrededor",
-+            MotorQuitar::Ideogram => "Con Ideogram (créditos): borra lo seleccionado y rellena con lo que habría detrás",
++        let tip = match e.motor_quitar {
++            MotorQuitar::Local => "Borra lo seleccionado y rellena con lo de alrededor (en tu PC)",
++            MotorQuitar::Ideogram => "Borra lo seleccionado y rellena con lo que habría detrás (Ideogram)",
 +        };
-+        if ui.add(egui::Button::new("Quitar objeto").frame(false)).on_hover_text(ayuda).clicked() {
++        if boton_plano(ui, "eraser", "Quitar objeto", t.icon).on_hover_text(tip).clicked() {
 +            pedir_info(e);
 +            pedido = Barra::QuitarObjeto;
 +        }
-+        if let Some(r) = e.resultado.as_ref().filter(|r| Some(r.doc) == doc) {
-+            if r.variaciones.len() > 1 {
-+                ui.separator();
-+                for i in 0..r.variaciones.len() {
-+                    if ui.selectable_label(r.actual == i, (i + 1).to_string()).on_hover_text("Cambiar de variación").clicked() {
-+                        pedido = Barra::Variacion(i);
-+                    }
-+                }
-+            }
-+            if r.aplicable && ui.small_button("Aplicar").on_hover_text("Combinar el resultado con la capa de abajo").clicked() {
-+                pedido = Barra::Aplicar;
-+            }
++        if crate::icons::button(ui, "sliders-horizontal", task_bar::BUTTON, false, "Más herramientas de IA").clicked() {
++            e.abierta = true;
++            pedir_info(e);
 +        }
 +    } else {
-+        let r = ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Describe qué poner (vacío = quitar)").desired_width(230.0));
++        let r = ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Describe qué poner…").desired_width(240.0).margin(egui::vec2(8.0, 4.0)));
++        let r = r.on_hover_text("Déjalo vacío para quitar lo seleccionado");
 +        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-+        if boton_generar(ui, costo, true).clicked() || enter {
++        if boton_acento(ui, "sparkles", &texto_generar(costo, false), egui::vec2(0.0, task_bar::BUTTON), true).clicked() || enter {
 +            if e.herramienta != Herramienta::Relleno {
 +                e.elegir_herramienta(Herramienta::Relleno);
 +            }
 +            pedido = Barra::Generar;
 +        }
-+        if ui.small_button("?").on_hover_text("Abrir la ventana de la IA: modelos, variaciones y más herramientas").clicked() {
++        if crate::icons::button(ui, "sliders-horizontal", task_bar::BUTTON, false, "Modelo, variaciones y más herramientas").clicked() {
 +            e.abierta = true;
 +        }
-+        if ui.small_button("×").on_hover_text("Cerrar").clicked() {
++        if crate::icons::button(ui, "x", task_bar::BUTTON, false, "Cerrar").clicked() {
 +            e.barra_expandida = false;
 +        }
 +    }
@@ -3626,10 +4014,10 @@ index e4bdc7a66..84669abaf 100644
          i if crate::links::url_for(i).is_some() => true,
 diff --git a/crates/ui-egui/tests/it/jacnex_ia.rs b/crates/ui-egui/tests/it/jacnex_ia.rs
 new file mode 100644
-index 000000000..34427686c
+index 000000000..2f587389c
 --- /dev/null
 +++ b/crates/ui-egui/tests/it/jacnex_ia.rs
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,538 @@
 +//! Jacnex: la IA integrada (`jacnex_ia`). Con una selección, la barra contextual ofrece
 +//! «Relleno generativo»; Generar envía la zona y su máscara al servidor, y el resultado vuelve como
 +//! una capa nueva recortada por la selección (un solo paso de historial). Las demás herramientas
@@ -3673,6 +4061,15 @@ index 000000000..34427686c
 +    h.run_steps(4);
 +    control(&mut h, "ui.set", json!({"tool": "rectMarquee", "zoom": 1.0, "center": [200, 150]}));
 +    h
++}
++
++/// Con JACNEX_IA_EVIDENCIA=carpeta, guarda cómo se ve la interfaz (render fuera de pantalla).
++fn evidencia(h: &mut Harness, nombre: &str) {
++    if let Some(dir) = std::env::var_os("JACNEX_IA_EVIDENCIA") {
++        std::fs::create_dir_all(&dir).unwrap();
++        h.run_steps(3);
++        h.render().expect("render fuera de pantalla").save(std::path::Path::new(&dir).join(format!("{nombre}.png"))).unwrap();
++    }
 +}
 +
 +fn control(h: &mut Harness, method: &str, params: Value) -> Value {
@@ -3898,6 +4295,43 @@ index 000000000..34427686c
 +}
 +
 +#[test]
++fn after_generating_the_bar_offers_apply_again_and_discard() {
++    let (mut h, recibido) = conectado();
++    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 120, "height": 80, "antiAlias": false})).unwrap();
++    h.run_steps(4);
++    let capas = h.state().session.active().unwrap().doc.layers.len();
++    h.state_mut().jacnex_ia.prompt = "flores rojas".into();
++    generar_y_esperar(&mut h);
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas + 1);
++
++    // La barra cambia a: Aplicar · Otra vez · Descartar.
++    h.get_by_label("Aplicar");
++    h.get_by_label("Descartar");
++    h.get_by_label("Otra vez").click();
++    h.run_steps(2);
++    assert!(ia::ocupado(h.state()), "Otra vez no empezó: {:?}", h.state().jacnex_ia_aviso());
++    let inicio = Instant::now();
++    while ia::hay_trabajo(h.state()) {
++        assert!(inicio.elapsed() < Duration::from_secs(60), "el resultado no llegó");
++        h.run_steps(2);
++        std::thread::sleep(Duration::from_millis(100));
++    }
++    h.run_steps(4);
++    assert_eq!(recibido.lock().unwrap().generar.len(), 2);
++    // El resultado anterior se cambió por el nuevo (no se apilan).
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas + 1);
++
++    h.get_by_label("Descartar").click();
++    h.run_steps(3);
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas);
++    // Y la barra vuelve a ofrecer la IA.
++    h.get_by_label("Quitar objeto");
++    // Ctrl+Z recupera lo descartado.
++    h.state_mut().run("edit.undo", json!({})).unwrap();
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas + 1);
++}
++
++#[test]
 +fn three_variations_switch_without_paying_again_and_apply_merges_down() {
 +    let (mut h, recibido) = conectado();
 +    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 120, "height": 80, "antiAlias": false})).unwrap();
@@ -3915,6 +4349,11 @@ index 000000000..34427686c
 +        assert_eq!(campo(&r.generar[0], "n").as_deref(), Some("3"));
 +    }
 +
++    evidencia(&mut h, "barra-resultado");
++    h.state_mut().jacnex_ia.abierta = true;
++    evidencia(&mut h, "panel-resultados");
++    h.state_mut().jacnex_ia.abierta = false;
++    h.run_steps(2);
 +    ia::cambiar_variacion(h.state_mut(), 2);
 +    h.run_steps(2);
 +    assert_eq!(pixel(h.state(), 160, 140), AZUL, "la tercera");
@@ -4087,17 +4526,24 @@ index 000000000..34427686c
 +    photocraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "jacnex.ia", Value::Null).unwrap();
 +    h.run_steps(6);
 +    assert!(h.state().jacnex_ia.abierta);
-+    h.get_by_label_contains("IA de Jacnex");
++    assert!(h.get_all_by_label("IA de Jacnex").count() >= 1);
 +    // El modelo por defecto y su descripción, aunque el servidor no responda.
 +    h.get_by_label_contains("El más económico de Google");
-+    h.get_by_label_contains("1 · Dónde");
++    h.get_by_label("HERRAMIENTA");
++    h.get_by_label_contains("Generar");
++    // Las herramientas, en el desplegable.
++    h.get_by_label("Relleno generativo").click();
++    h.run_steps(3);
 +    for herramienta in ["Quitar fondo", "Expandir imagen", "Mejorar resolución", "Texto con IA", "Retoques en un clic", "Generar fondo"] {
 +        h.get_by_label(herramienta);
 +    }
 +    // Cada herramienta se dibuja sin fallar.
++    evidencia(&mut h, "panel-menu-herramientas");
++    h.key_press(egui::Key::Escape);
 +    for herramienta in Herramienta::TODAS {
 +        h.state_mut().jacnex_ia.herramienta = herramienta;
 +        h.run_steps(3);
++        evidencia(&mut h, &format!("panel-{herramienta:?}"));
 +    }
 +}
 +
