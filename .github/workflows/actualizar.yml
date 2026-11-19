@@ -85,6 +85,8 @@ jobs:
     needs: revisar
     if: needs.revisar.outputs.compilar == 'true'
     uses: jacnexstudio/jacnex-build/.github/workflows/compilar-windows.yml@main
+    # Las claves de R2 (descargas.jacnex.store) para copiar ahí la versión publicada.
+    secrets: inherit
     with:
       proyecto: ${{ inputs.proyecto }}
       upstream: ${{ inputs.upstream }}

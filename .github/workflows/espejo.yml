@@ -1,0 +1,38 @@
+# Copia las versiones publicadas a descargas.jacnex.store (Cloudflare R2), de donde descargan y se
+# actualizan Jacnex Studio y las apps. Cada versión nueva ya se copia sola al publicarse
+# (compilar-windows.yml); esto sirve para la primera copia o para volver a copiar a mano.
+
+name: Copiar a descargas.jacnex.store
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Repositorios (separados por espacio)"
+        type: string
+        default: "jacnex-studio photocraft lightcraft vectorcraft designcraft filmcraft effectcraft pdfcraft"
+      versiones:
+        description: "Cuántas versiones de cada uno guardar"
+        type: string
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  copiar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Copiar a R2
+        env:
+          # Lee las versiones de otros repositorios de la organización: con repositorios privados
+          # hace falta un token con acceso (secreto ESPEJO_GH_TOKEN); si no, basta el de este flujo.
+          GH_TOKEN: ${{ secrets.ESPEJO_GH_TOKEN || github.token }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          REPOS: ${{ inputs.repos }}
+          VERSIONES: ${{ inputs.versiones }}
+        run: python -B espejo/espejo_r2.py sincronizar $REPOS --versiones "$VERSIONES"
