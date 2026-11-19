@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from reglas.comunes import ErrorDeParche  # noqa: E402
 import identidad  # noqa: E402
+import descargas  # noqa: E402
 
 RAIZ = Path(__file__).resolve().parent.parent
 MARCA = json.loads((RAIZ / "marca.json").read_text(encoding="utf-8"))
@@ -193,6 +194,7 @@ def main():
     aplicados = aplicar_diseno(carpeta, proyecto)
     if aplicados:
         print(f"  diseño de Jacnex aplicado ({aplicados} parches)")
+    print(f"  descargas desde descargas.jacnex.store en {descargas.aplicar(carpeta, MARCA, proyecto, archivos, leer_texto, PROTEGIDOS)} archivos")
     avisar_modificacion(carpeta, reglas.nombre_producto(MARCA))
 
     quedan = restos(carpeta)

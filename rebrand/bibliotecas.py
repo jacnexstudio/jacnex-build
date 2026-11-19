@@ -22,6 +22,10 @@ lo actualiza a la última versión (obligatorio, con aviso y la ventana de Windo
 
 Ajuste: escribir "@" en Windows (ver TECLADO).
 
+Ajuste: descargas propias. craft-update busca versiones y descarga en descargas.jacnex.store (copia
+de las versiones en Cloudflare R2, con las mismas rutas que GitHub) en vez de GitHub, así los
+repositorios de jacnexstudio pueden ser privados (ver descargas.py).
+
 Ajuste: Jacnex Studio reconoce su propio MSI (ver AJUSTES_MSI). craft-update solo trata como "el
 launcher" a artcraft-launcher (con su carpeta anotada en HKCU, Learning Machines LLC) y solo cuenta
 los instaladores publicados por "Learning Machines LLC". Jacnex Studio 0.19.3 y 0.19.4 no
@@ -36,6 +40,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import descargas
 
 
 class ErrorDeAjuste(Exception):
@@ -135,7 +141,7 @@ mod jacnex_launcher {
     const LANZADOR: &str = "jacnex-studio";
     const EXE: &str = "jacnex-studio.exe";
     const CLAVE: &str = r"Software\Jacnex\Jacnex Studio";
-    const DESCARGAS: &str = "https://github.com/jacnexstudio/jacnex-studio/releases/latest/download/";
+    const DESCARGAS: &str = "https://descargas.jacnex.store/jacnexstudio/jacnex-studio/releases/latest/download/";
     /// Textos que solo tiene un Jacnex Studio que no puede actualizarse solo: el que exige firma
     /// digital y el que no reconoce su propio MSI. Escritos al revés: este código también va dentro
     /// de Jacnex Studio, que si no los tendría siempre.
@@ -425,6 +431,8 @@ def main():
             raise ErrorDeAjuste(f"no se encontró craft-update {rev[:7]} en {cargo_home()}")
         for archivo in archivos:
             print(f"Bibliotecas: craft-update {rev[:7]} {'ajustado' if ajustar(archivo) else 'ya estaba ajustado'}")
+            print(f"Bibliotecas: craft-update {rev[:7]} descarga de descargas.jacnex.store "
+                  f"({descargas.ajustar_craft_update(archivo.parent)} archivos cambiados)")
     print(f"Bibliotecas: {recompilar(carpeta)} archivos compilados de craft-update borrados")
 
 
