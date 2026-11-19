@@ -1,3 +1,15 @@
+diff --git a/ATTRIBUTION.md b/ATTRIBUTION.md
+index e9764f8a5..4fac9f744 100644
+--- a/ATTRIBUTION.md
++++ b/ATTRIBUTION.md
+@@ -57,6 +57,7 @@ next to them.
+ | `crates/ui-egui/src/theme.rs` (Breeze Light and Breeze Dark themes) | The Breeze Light and Breeze Dark themes are original colour values on PhotoCraft's Studio layout, chosen to look close to KDE Plasma's Breeze (cool blue-greys, blue accent, 5 px frame radius) so the app blends into a Plasma desktop. None of Breeze's colour values, files or code are copied; the values are a few levels away from its schemes and tuned for text contrast | PhotoCraft contributors | Inspired by the look of KDE Breeze, <https://invent.kde.org/plasma/breeze> (its colour schemes are LGPL-2.0-or-later) | Original work |
+ | `crates/ui-egui/src/theme.rs` (Soft Dark and Soft Light themes) | Original colour values and radii for two low-contrast themes on PhotoCraft's Studio layout; no third-party palette, file or code is used | PhotoCraft contributors | Original | Original work |
+ | `crates/algo/data/libfacedetection.bin` (face detection weights, read by `crates/algo/src/faces.rs`, whose network code is a port of the library's) | libfacedetection CNN (YuNet design) weights and inference code, weights converted to half precision | Shiqi Yu | [ShiqiYu/libfacedetection](https://github.com/ShiqiYu/libfacedetection) (`src/facedetectcnn-data.cpp`, `facedetectcnn.cpp`, `facedetectcnn-model.cpp`) | BSD-3-Clause, [`LICENSE-libfacedetection.txt`](crates/algo/data/LICENSE-libfacedetection.txt) |
++| `crates/engine/assets/migan/migan-512.jxm` (inpainting weights, embedded by `crates/engine/src/jacnex_migan.rs`, which runs the network) | MI-GAN 512 generator (Places2), weights converted to half precision | Picsart AI Research | [Picsart-AI-Research/MI-GAN](https://github.com/Picsart-AI-Research/MI-GAN) | MIT, [`LICENSE-WEIGHTS`](crates/engine/assets/migan/LICENSE-WEIGHTS) |
+ 
+ ### Optional build input: craft-fonts (not files in this repo)
+ 
 diff --git a/Cargo.lock b/Cargo.lock
 index 860de3aae..d0cac4e2f 100644
 --- a/Cargo.lock
@@ -10,6 +22,18 @@ index 860de3aae..d0cac4e2f 100644
   "web-time",
   "winsafe",
  ]
+diff --git a/NOTICE b/NOTICE
+index e2ed670e9..9b1e175d0 100644
+--- a/NOTICE
++++ b/NOTICE
+@@ -17,6 +17,7 @@ JetBrains Mono font (assets/fonts/JetBrainsMono-Regular.ttf) — SIL Open Font L
+ Lucide icons (assets/icons/*.svg, except slice-knife.svg) — ISC; icons derived from Feather also MIT. See assets/icons/LICENSE-lucide.txt.
+ SCOWL English word list (assets/dict/en_US-scowl-50.txt.gz) — SCOWL license. See assets/dict/LICENSE-SCOWL.txt.
+ libfacedetection face detection weights and network (crates/algo/data/libfacedetection.bin, crates/algo/src/faces/cnn.rs) — BSD-3-Clause, Copyright (c) 2015-2019, Shiqi Yu, all rights reserved. See crates/algo/data/LICENSE-libfacedetection.txt.
++MI-GAN inpainting weights (crates/engine/assets/migan/migan-512.jxm, run by crates/engine/src/jacnex_migan.rs) — MIT, Copyright (c) 2024 Picsart AI Research (PAIR). See crates/engine/assets/migan/LICENSE-WEIGHTS.
+ Interface translations (embedded at build time from storytold/craft-i18n locales/<code>/common.tsv and photocraft.tsv, at the commit in craft-i18n.rev) — MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the craft-i18n contributors; the license texts are the same as LICENSE-MIT and LICENSE-APACHE. Per-language credits and provenance: https://github.com/storytold/craft-i18n/blob/main/ATTRIBUTION.md
+ 
+ Builds made with craft-fonts (CRAFT_FONTS_DIR; all official releases) also embed the fonts listed in
 diff --git a/crates/engine/src/jacnex_ia.rs b/crates/engine/src/jacnex_ia.rs
 new file mode 100644
 index 000000000..2e04308d8
@@ -258,15 +282,794 @@ index 000000000..2e04308d8
 +        assert!(open_as_document(&mut s, "x", 2, 2, &[0; 4]).is_err());
 +    }
 +}
+diff --git a/crates/engine/src/jacnex_migan.rs b/crates/engine/src/jacnex_migan.rs
+new file mode 100644
+index 000000000..7d97c4354
+--- /dev/null
++++ b/crates/engine/src/jacnex_migan.rs
+@@ -0,0 +1,772 @@
++//! Jacnex: Remove Object on this computer, free and offline, with MI-GAN (Sargsyan et al.,
++//! "MI-GAN: A Simple Baseline for Image Inpainting on Mobile Devices", ICCV 2023; Picsart AI
++//! Research, MIT code and weights). The 512 px Places2 generator runs here in plain Rust: no
++//! runtime, no GPU, no download. Its weights (fp16) are compiled in from
++//! `assets/migan/migan-512.jxm`; notice in `assets/migan/LICENSE-WEIGHTS` and `ATTRIBUTION.md`.
++//!
++//! [`remove`] takes the photo and the area to remove, crops a square around that area (with
++//! 128 px of context on each side, at least 512 px), runs the network at 512×512 and blends the
++//! result back with a soft edge. Only the crop changes; it is returned with its position.
++
++use std::collections::HashMap;
++use std::sync::{Arc, OnceLock};
++
++use rayon::prelude::*;
++
++use crate::{EngineError, Result};
++
++/// The network's side, in pixels.
++const RES: usize = 512;
++/// Context kept around the area to remove, on each side, before scaling to [`RES`].
++const PADDING: usize = 128;
++/// The largest photo side accepted (the crop is what runs; this bounds the copies).
++pub const MAX_SIDE: u32 = 30_000;
++
++#[cfg(not(target_arch = "wasm32"))]
++static WEIGHTS: &[u8] = include_bytes!("../assets/migan/migan-512.jxm");
++/// The browser build does not carry the 13 MB of weights.
++#[cfg(target_arch = "wasm32")]
++static WEIGHTS: &[u8] = &[];
++
++/// What [`remove`] changed: the crop `(x, y, width, height)` and its new RGBA8 pixels.
++#[derive(Clone, Debug)]
++pub struct Filled {
++    pub x: u32,
++    pub y: u32,
++    pub width: u32,
++    pub height: u32,
++    pub rgba: Vec<u8>,
++}
++
++/// Whether the local model is in this build.
++pub fn available() -> bool {
++    model().is_ok()
++}
++
++/// How far around the hole's bounds (`width`×`height`) [`remove`] looks: a caller can cut the
++/// image to the hole's bounds grown by this on every side and get the same result.
++pub fn context_margin(width: u32, height: u32) -> u32 {
++    let side = (width.max(height) as usize).saturating_add(2 * PADDING).max(RES);
++    u32::try_from(side).unwrap_or(u32::MAX)
++}
++
++/// Fills `hole` (one byte a pixel, anything above 0 = remove) of `rgba` (`width`×`height`,
++/// RGBA8) with what could be behind it. `None`-like cases (nothing to remove, sizes that do not
++/// match) are errors, never panics.
++pub fn remove(rgba: &[u8], width: u32, height: u32, hole: &[u8]) -> Result<Filled> {
++    let (w, h) = (width as usize, height as usize);
++    if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
++        return Err(EngineError::Other("the image does not have a usable size".into()));
++    }
++    let n = w.checked_mul(h).ok_or_else(|| EngineError::Other("the image is too large".into()))?;
++    if rgba.len() != n.saturating_mul(4) || hole.len() != n {
++        return Err(EngineError::Other("the image and the area to remove do not match".into()));
++    }
++    let (x0, x1, y0, y1) = crop_box(hole, w, h).ok_or_else(|| EngineError::Other("there is nothing to remove".into()))?;
++    let m = model().map_err(|e| EngineError::Other(e.clone()))?;
++    let (cw, ch) = (x1 - x0, y1 - y0);
++
++    // The crop, as floats, and its hole (1 = remove).
++    let mut img = vec![0f32; cw * ch * 3];
++    let mut holes = vec![0u8; cw * ch];
++    for y in 0..ch {
++        for x in 0..cw {
++            let s = (y0 + y) * w + x0 + x;
++            let d = y * cw + x;
++            for c in 0..3 {
++                img[d * 3 + c] = f32::from(rgba.get(s * 4 + c).copied().unwrap_or(0));
++            }
++            holes[d] = u8::from(hole.get(s).copied().unwrap_or(0) > 0);
++        }
++    }
++
++    // The network's input: known area − 0.5, then the photo in [−1, 1] with the hole blanked.
++    let small = resize(&img, cw, ch, RES, RES, 3);
++    let small_hole = shrink_hole(&holes, cw, ch, RES, RES);
++    let mut input = Map::new(RES, RES, 4);
++    for (p, px) in input.d.chunks_exact_mut(4).enumerate() {
++        let known = 1.0 - f32::from(small_hole.get(p).copied().unwrap_or(1));
++        px[0] = known - 0.5;
++        for c in 0..3 {
++            px[c + 1] = (small.get(p * 3 + c).copied().unwrap_or(0.0) * 2.0 / 255.0 - 1.0) * known;
++        }
++    }
++    let out = m.run(&input)?;
++    let out: Vec<f32> = out.d.iter().map(|v| ((v * 0.5 + 0.5) * 255.0).clamp(0.0, 255.0)).collect();
++    let out = resize(&out, RES, RES, cw, ch, 3);
++
++    // Blend: the known area, eroded by one pixel into the hole's edge and blurred, keeps the photo.
++    let keep = blend_mask(&holes, cw, ch);
++    let mut res = vec![0u8; cw * ch * 4];
++    for (d, px) in res.chunks_exact_mut(4).enumerate() {
++        let k = keep.get(d).copied().unwrap_or(1.0);
++        for c in 0..3 {
++            let a = img.get(d * 3 + c).copied().unwrap_or(0.0);
++            let b = out.get(d * 3 + c).copied().unwrap_or(0.0);
++            px[c] = (a * k + b * (1.0 - k)).round().clamp(0.0, 255.0) as u8;
++        }
++        px[3] = 255;
++    }
++    Ok(Filled { x: x0 as u32, y: y0 as u32, width: cw as u32, height: ch as u32, rgba: res })
++}
++
++/// The crop `(x0, x1, y0, y1)` (end exclusive) around the hole: a square of the hole's larger
++/// side plus [`PADDING`] on each side (at least [`RES`]), centred on it, moved and cut to fit.
++fn crop_box(hole: &[u8], w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
++    let (mut x_min, mut x_max, mut y_min, mut y_max) = (usize::MAX, 0, usize::MAX, 0);
++    for (y, row) in hole.chunks_exact(w).enumerate().take(h) {
++        for (x, &v) in row.iter().enumerate() {
++            if v > 0 {
++                x_min = x_min.min(x);
++                x_max = x_max.max(x);
++                y_min = y_min.min(y);
++                y_max = y_max.max(y);
++            }
++        }
++    }
++    if x_min == usize::MAX {
++        return None;
++    }
++    let side = (x_max - x_min).max(y_max - y_min) + 2 * PADDING;
++    let side = side.max(RES);
++    let half = side / 2;
++    let axis = |lo: usize, hi: usize, len: usize| {
++        let centre = (lo + hi) / 2;
++        let mut a = centre.saturating_sub(half);
++        let mut b = (centre + half).min(len);
++        // Cut at one border: give the rest to the other side.
++        let excess = side.saturating_sub(b - a);
++        a = a.saturating_sub(excess);
++        b = (b + excess).min(len);
++        (a, b)
++    };
++    let (x0, x1) = axis(x_min, x_max, w);
++    let (y0, y1) = axis(y_min, y_max, h);
++    (x1 > x0 && y1 > y0).then_some((x0, x1, y0, y1))
++}
++
++/// Resizes `src` (`sw`×`sh`, `c` interleaved channels) with a triangle filter that widens when
++/// shrinking, so a large crop does not alias when it goes down to 512.
++fn resize(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize, c: usize) -> Vec<f32> {
++    let horizontal = weights(sw, dw);
++    let vertical = weights(sh, dh);
++    let mut mid = vec![0f32; dw * sh * c];
++    mid.par_chunks_mut(dw * c).enumerate().for_each(|(y, row)| {
++        let line = src.get(y * sw * c..(y + 1) * sw * c).unwrap_or(&[]);
++        for (x, (start, ws)) in horizontal.iter().enumerate() {
++            for (i, wt) in ws.iter().enumerate() {
++                let s = (start + i) * c;
++                for k in 0..c {
++                    if let (Some(o), Some(v)) = (row.get_mut(x * c + k), line.get(s + k)) {
++                        *o += wt * v;
++                    }
++                }
++            }
++        }
++    });
++    let mut out = vec![0f32; dw * dh * c];
++    out.par_chunks_mut(dw * c).enumerate().for_each(|(y, row)| {
++        let Some((start, ws)) = vertical.get(y) else { return };
++        for (i, wt) in ws.iter().enumerate() {
++            let line = mid.get((start + i) * dw * c..(start + i + 1) * dw * c).unwrap_or(&[]);
++            for (o, v) in row.iter_mut().zip(line) {
++                *o += wt * v;
++            }
++        }
++    });
++    out
++}
++
++/// For each destination index, the first source index and the normalised weights.
++fn weights(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
++    let scale = src as f32 / dst as f32;
++    let support = scale.max(1.0);
++    (0..dst)
++        .map(|i| {
++            let centre = (i as f32 + 0.5) * scale;
++            let lo = ((centre - support).floor().max(0.0)) as usize;
++            let hi = ((centre + support).ceil() as usize).min(src);
++            let mut ws: Vec<f32> = (lo..hi).map(|j| (1.0 - ((j as f32 + 0.5 - centre) / support).abs()).max(0.0)).collect();
++            let sum: f32 = ws.iter().sum();
++            if sum > 0.0 {
++                ws.iter_mut().for_each(|v| *v /= sum);
++            } else {
++                // A degenerate span: take the nearest pixel.
++                ws = vec![1.0];
++                return ((centre as usize).min(src.saturating_sub(1)), ws);
++            }
++            (lo, ws)
++        })
++        .collect()
++}
++
++/// The hole at `dw`×`dh`: a destination pixel is a hole when any source pixel under it is, so a
++/// thin wire does not vanish when a large crop goes down to 512.
++fn shrink_hole(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
++    let span = |i: usize, s: usize, d: usize| {
++        let a = i * s / d;
++        let b = ((i + 1) * s).div_ceil(d).max(a + 1).min(s);
++        a..b
++    };
++    let mut out = vec![0u8; dw * dh];
++    out.par_chunks_mut(dw).enumerate().for_each(|(y, row)| {
++        let ys = span(y, sh, dh);
++        for (x, o) in row.iter_mut().enumerate() {
++            let xs = span(x, sw, dw);
++            *o = u8::from(ys.clone().any(|sy| src.get(sy * sw + xs.start..sy * sw + xs.end).is_some_and(|r| r.iter().any(|&v| v > 0))));
++        }
++    });
++    out
++}
++
++/// How much of the photo to keep (1 = all): the known area grown by one pixel (3×3 max), then a
++/// 5×5 Gaussian blur (reflected at the borders).
++fn blend_mask(holes: &[u8], w: usize, h: usize) -> Vec<f32> {
++    let known = |x: usize, y: usize| holes.get(y * w + x).is_some_and(|&v| v == 0);
++    let mut grown = vec![0f32; w * h];
++    grown.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
++        for (x, o) in row.iter_mut().enumerate() {
++            let any = (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| (x.saturating_sub(1)..(x + 2).min(w)).any(|xx| known(xx, yy)));
++            *o = if any { 1.0 } else { 0.0 };
++        }
++    });
++    let g: Vec<f32> = (0..5).map(|i| (-((i as f32 - 2.0) / 2.0).powi(2)).exp()).collect();
++    let sum: f32 = g.iter().sum();
++    let g: Vec<f32> = g.iter().map(|v| v / sum).collect();
++    let reflect = |i: isize, n: usize| -> usize {
++        let n = n as isize;
++        if n == 1 {
++            return 0;
++        }
++        let mut i = i;
++        if i < 0 {
++            i = -i;
++        }
++        if i >= n {
++            i = 2 * (n - 1) - i;
++        }
++        i.clamp(0, n - 1) as usize
++    };
++    let mut mid = vec![0f32; w * h];
++    mid.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
++        for (x, o) in row.iter_mut().enumerate() {
++            *o = g.iter().enumerate().map(|(k, gv)| gv * grown.get(y * w + reflect(x as isize + k as isize - 2, w)).copied().unwrap_or(0.0)).sum();
++        }
++    });
++    let mut out = vec![0f32; w * h];
++    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
++        for (x, o) in row.iter_mut().enumerate() {
++            *o = g.iter().enumerate().map(|(k, gv)| gv * mid.get(reflect(y as isize + k as isize - 2, h) * w + x).copied().unwrap_or(0.0)).sum();
++        }
++    });
++    out
++}
++
++// --- The network ---------------------------------------------------------------------------------
++
++/// A feature map, channels last (`(y * w + x) * c + channel`).
++#[derive(Clone)]
++struct Map {
++    w: usize,
++    h: usize,
++    c: usize,
++    d: Vec<f32>,
++}
++
++impl Map {
++    fn new(w: usize, h: usize, c: usize) -> Self {
++        Map { w, h, c, d: vec![0.0; w * h * c] }
++    }
++}
++
++/// A 1×1 convolution, weights stored input-major (`i * outputs + o`).
++struct Pointwise {
++    inputs: usize,
++    outputs: usize,
++    w: Vec<f32>,
++    bias: Option<Vec<f32>>,
++}
++
++/// MI-GAN's separable convolution: 3×3 per channel (with bias) and activation, optionally a 2×
++/// blur-downsample, a 1×1 mix, optionally a 2× upsample, optional fixed noise, activation.
++struct Separable {
++    channels: usize,
++    /// 3×3 taps, tap-major (`tap * channels + c`).
++    depthwise: Vec<f32>,
++    depthwise_bias: Vec<f32>,
++    mix: Pointwise,
++    down: bool,
++    up: bool,
++    noise: Option<Vec<f32>>,
++}
++
++struct Model {
++    from_rgb: Pointwise,
++    /// Encoder blocks from 512 to 4 px: (conv1, conv2).
++    encoder: Vec<(Separable, Separable)>,
++    /// Synthesis blocks from 4 to 512 px: (conv1, conv2, to-RGB).
++    synthesis: Vec<(Separable, Separable, Pointwise)>,
++}
++
++/// Encoder (and synthesis) block sizes.
++const SIZES: [usize; 8] = [512, 256, 128, 64, 32, 16, 8, 4];
++
++fn model() -> std::result::Result<&'static Arc<Model>, &'static String> {
++    static MODEL: OnceLock<std::result::Result<Arc<Model>, String>> = OnceLock::new();
++    MODEL.get_or_init(|| Model::load(WEIGHTS).map(Arc::new)).as_ref()
++}
++
++/// The activation: leaky ReLU (0.2), gain √2, clamped to ±256.
++#[inline]
++fn act(v: f32) -> f32 {
++    let v = if v < 0.0 { v * 0.2 } else { v };
++    (v * std::f32::consts::SQRT_2).clamp(-256.0, 256.0)
++}
++
++impl Model {
++    fn load(bytes: &[u8]) -> std::result::Result<Model, String> {
++        let mut t = read_tensors(bytes)?;
++        let mut take = |name: &str, shape: &[usize]| -> std::result::Result<Vec<f32>, String> {
++            let (s, v) = t.remove(name).ok_or_else(|| format!("the local model has no {name}"))?;
++            if s != shape {
++                return Err(format!("the local model's {name} has the wrong shape"));
++            }
++            Ok(v)
++        };
++        let pointwise = |take: &mut dyn FnMut(&str, &[usize]) -> std::result::Result<Vec<f32>, String>, name: &str, i: usize, o: usize, bias: bool| {
++            let w = take(&format!("{name}.weight"), &[o, i, 1, 1])?;
++            let mut t = vec![0f32; i * o];
++            for oo in 0..o {
++                for ii in 0..i {
++                    if let (Some(d), Some(s)) = (t.get_mut(ii * o + oo), w.get(oo * i + ii)) {
++                        *d = *s;
++                    }
++                }
++            }
++            let bias = if bias { Some(take(&format!("{name}.bias"), &[o])?) } else { None };
++            Ok::<_, String>(Pointwise { inputs: i, outputs: o, w: t, bias })
++        };
++        let separable = |take: &mut dyn FnMut(&str, &[usize]) -> std::result::Result<Vec<f32>, String>,
++                         name: &str,
++                         i: usize,
++                         o: usize,
++                         down: bool,
++                         up: bool,
++                         noise: Option<usize>| {
++            let dw = take(&format!("{name}.conv1.weight"), &[i, 1, 3, 3])?;
++            let mut depthwise = vec![0f32; 9 * i];
++            for c in 0..i {
++                for tap in 0..9 {
++                    if let (Some(d), Some(s)) = (depthwise.get_mut(tap * i + c), dw.get(c * 9 + tap)) {
++                        *d = *s;
++                    }
++                }
++            }
++            let depthwise_bias = take(&format!("{name}.conv1.bias"), &[i])?;
++            let mix = pointwise(take, &format!("{name}.conv2"), i, o, false)?;
++            let noise = match noise {
++                Some(r) => Some(take(&format!("{name}.noise"), &[r, r])?),
++                None => None,
++            };
++            Ok::<_, String>(Separable { channels: i, depthwise, depthwise_bias, mix, down, up, noise })
++        };
++        let ch = |r: usize| (32_768 / r).min(512);
++        let from_rgb = pointwise(&mut take, "encoder.b512.fromrgb", 4, ch(512), true)?;
++        let mut encoder = Vec::new();
++        for (k, &r) in SIZES.iter().enumerate() {
++            let next = SIZES.get(k + 1).copied();
++            let (i, o) = (ch(r), next.map(ch).unwrap_or(ch(r)));
++            let a = separable(&mut take, &format!("encoder.b{r}.conv1"), i, i, false, false, None)?;
++            let b = separable(&mut take, &format!("encoder.b{r}.conv2"), i, o, next.is_some(), false, None)?;
++            encoder.push((a, b));
++        }
++        let mut synthesis = Vec::new();
++        for &r in SIZES.iter().rev() {
++            // The 4 px block starts the image; each larger one doubles it, with noise.
++            let first = r == 4;
++            let (i, o) = if first { (ch(4), ch(4)) } else { (ch(r / 2), ch(r)) };
++            let noise = (!first).then_some(r);
++            let a = separable(&mut take, &format!("synthesis.b{r}.conv1"), i, o, false, !first, noise)?;
++            let b = separable(&mut take, &format!("synthesis.b{r}.conv2"), o, o, false, false, noise)?;
++            let rgb = pointwise(&mut take, &format!("synthesis.b{r}.torgb"), o, 3, true)?;
++            synthesis.push((a, b, rgb));
++        }
++        Ok(Model { from_rgb, encoder, synthesis })
++    }
++
++    /// The generator: `x` is 512×512×4 (known − 0.5, masked RGB); returns 512×512×3 in ~[−1, 1].
++    fn run(&self, x: &Map) -> Result<Map> {
++        if x.w != RES || x.h != RES || x.c != 4 {
++            return Err(EngineError::Other("the local model got the wrong input".into()));
++        }
++        let mut h = pointwise(x, &self.from_rgb, true);
++        let mut feats = Vec::with_capacity(SIZES.len());
++        for (a, b) in &self.encoder {
++            let f = separable(&h, a);
++            h = separable(&f, b);
++            feats.push(f);
++        }
++        let mut img: Option<Map> = None;
++        for (k, (a, b, rgb)) in self.synthesis.iter().enumerate() {
++            let feat = feats.get(SIZES.len() - 1 - k).ok_or_else(|| EngineError::Other("the local model is incomplete".into()))?;
++            let mut y = separable(&h, a);
++            if y.d.len() != feat.d.len() {
++                return Err(EngineError::Other("the local model's sizes do not match".into()));
++            }
++            y.d.iter_mut().zip(&feat.d).for_each(|(v, f)| *v += f);
++            h = separable(&y, b);
++            let mut out = pointwise(&h, rgb, false);
++            if let Some(prev) = img.take() {
++                let up = upsample(&prev);
++                if up.d.len() != out.d.len() {
++                    return Err(EngineError::Other("the local model's sizes do not match".into()));
++                }
++                out.d.iter_mut().zip(&up.d).for_each(|(v, u)| *v += u);
++            }
++            img = Some(out);
++        }
++        img.ok_or_else(|| EngineError::Other("the local model is incomplete".into()))
++    }
++}
++
++/// A 1×1 convolution (a matrix product over channels), activated when `activate`.
++fn pointwise(x: &Map, p: &Pointwise, activate: bool) -> Map {
++    let (k, m) = (p.inputs, p.outputs);
++    let mut out = Map::new(x.w, x.h, m);
++    if x.c != k {
++        return out;
++    }
++    const ROWS: usize = 32;
++    out.d.par_chunks_mut(ROWS * m).zip(x.d.par_chunks(ROWS * k)).for_each(|(o, a)| {
++        let rows = o.len() / m;
++        if let Some(b) = &p.bias {
++            for row in o.chunks_exact_mut(m) {
++                row.copy_from_slice(b);
++            }
++        }
++        if m % 16 == 0 {
++            for j0 in (0..m).step_by(16) {
++                let mut r = 0;
++                while r + 4 <= rows {
++                    kernel4x16(a, &p.w, o, r, j0, k, m);
++                    r += 4;
++                }
++                for rr in r..rows {
++                    for (kk, bv) in p.w.chunks_exact(m).enumerate() {
++                        let av = a.get(rr * k + kk).copied().unwrap_or(0.0);
++                        for j in j0..j0 + 16 {
++                            if let (Some(c), Some(b)) = (o.get_mut(rr * m + j), bv.get(j)) {
++                                *c += av * b;
++                            }
++                        }
++                    }
++                }
++            }
++        } else {
++            for rr in 0..rows {
++                for (kk, bv) in p.w.chunks_exact(m).enumerate() {
++                    let av = a.get(rr * k + kk).copied().unwrap_or(0.0);
++                    if let Some(c) = o.get_mut(rr * m..(rr + 1) * m) {
++                        c.iter_mut().zip(bv).for_each(|(c, b)| *c += av * b);
++                    }
++                }
++            }
++        }
++        if activate {
++            o.iter_mut().for_each(|v| *v = act(*v));
++        }
++    });
++    out
++}
++
++/// Four rows × sixteen outputs of `c += a · b`, held in registers across the whole sum.
++#[inline]
++fn kernel4x16(a: &[f32], b: &[f32], c: &mut [f32], r: usize, j0: usize, k: usize, m: usize) {
++    let (Some(a0), Some(a1), Some(a2), Some(a3)) =
++        (a.get(r * k..(r + 1) * k), a.get((r + 1) * k..(r + 2) * k), a.get((r + 2) * k..(r + 3) * k), a.get((r + 3) * k..(r + 4) * k))
++    else {
++        return;
++    };
++    let mut acc = [[0f32; 16]; 4];
++    for (kk, row) in b.chunks_exact(m).enumerate().take(k) {
++        let Some(bv) = row.get(j0..j0 + 16) else { return };
++        let (x0, x1, x2, x3) = (a0[kk], a1[kk], a2[kk], a3[kk]);
++        for j in 0..16 {
++            acc[0][j] += x0 * bv[j];
++            acc[1][j] += x1 * bv[j];
++            acc[2][j] += x2 * bv[j];
++            acc[3][j] += x3 * bv[j];
++        }
++    }
++    for (i, row) in acc.iter().enumerate() {
++        if let Some(dst) = c.get_mut((r + i) * m + j0..(r + i) * m + j0 + 16) {
++            dst.iter_mut().zip(row).for_each(|(d, v)| *d += v);
++        }
++    }
++}
++
++fn separable(x: &Map, s: &Separable) -> Map {
++    let mut y = depthwise3(x, &s.depthwise, &s.depthwise_bias, s.channels);
++    if s.down {
++        y = downsample(&y);
++    }
++    let mut y = pointwise(&y, &s.mix, false);
++    if s.up {
++        y = upsample(&y);
++    }
++    if let Some(n) = &s.noise {
++        if n.len() == y.w * y.h {
++            y.d.par_chunks_mut(y.c).zip(n.par_iter()).for_each(|(px, v)| px.iter_mut().for_each(|p| *p += v));
++        }
++    }
++    y.d.par_iter_mut().for_each(|v| *v = act(*v));
++    y
++}
++
++/// 3×3 per-channel convolution (zero padding) plus bias, then the activation.
++fn depthwise3(x: &Map, w: &[f32], bias: &[f32], c: usize) -> Map {
++    let mut out = Map::new(x.w, x.h, c);
++    if x.c != c {
++        return out;
++    }
++    let (xw, xh) = (x.w, x.h);
++    out.d.par_chunks_mut(xw * c).enumerate().for_each(|(y, row)| {
++        for (xx, px) in row.chunks_exact_mut(c).enumerate() {
++            px.copy_from_slice(bias.get(..c).unwrap_or(&[]).get(..px.len()).unwrap_or(&[]));
++            for ky in 0..3 {
++                let Some(sy) = (y + ky).checked_sub(1).filter(|&v| v < xh) else { continue };
++                for kx in 0..3 {
++                    let Some(sx) = (xx + kx).checked_sub(1).filter(|&v| v < xw) else { continue };
++                    let (Some(src), Some(wt)) = (x.d.get((sy * xw + sx) * c..(sy * xw + sx + 1) * c), w.get((ky * 3 + kx) * c..(ky * 3 + kx + 1) * c)) else {
++                        continue;
++                    };
++                    px.iter_mut().zip(src.iter().zip(wt)).for_each(|(p, (s, k))| *p += s * k);
++                }
++            }
++            px.iter_mut().for_each(|v| *v = act(*v));
++        }
++    });
++    out
++}
++
++/// The 4-tap blur filter [1, 3, 3, 1].
++const TAPS: [f32; 4] = [1.0, 3.0, 3.0, 1.0];
++
++/// 2× downsample: [1, 3, 3, 1]² / 64 blur, stride 2, one pixel of zero padding.
++fn downsample(x: &Map) -> Map {
++    let (w, h, c) = (x.w / 2, x.h / 2, x.c);
++    let mut out = Map::new(w, h, c);
++    out.d.par_chunks_mut(w * c).enumerate().for_each(|(y, row)| {
++        for (xx, px) in row.chunks_exact_mut(c).enumerate() {
++            for (ky, wy) in TAPS.iter().enumerate() {
++                let Some(sy) = (2 * y + ky).checked_sub(1).filter(|&v| v < x.h) else { continue };
++                for (kx, wx) in TAPS.iter().enumerate() {
++                    let Some(sx) = (2 * xx + kx).checked_sub(1).filter(|&v| v < x.w) else { continue };
++                    let k = wy * wx / 64.0;
++                    if let Some(src) = x.d.get((sy * x.w + sx) * c..(sy * x.w + sx + 1) * c) {
++                        px.iter_mut().zip(src).for_each(|(p, s)| *p += s * k);
++                    }
++                }
++            }
++        }
++    });
++    out
++}
++
++/// 2× upsample: zero insertion, then the [1, 3, 3, 1]² / 16 filter (padding 2 before, 1 after).
++fn upsample(x: &Map) -> Map {
++    let (w, h, c) = (x.w * 2, x.h * 2, x.c);
++    let mut out = Map::new(w, h, c);
++    out.d.par_chunks_mut(w * c).enumerate().for_each(|(y, row)| {
++        for (xx, px) in row.chunks_exact_mut(c).enumerate() {
++            for (ky, wy) in TAPS.iter().enumerate() {
++                // The zero-stuffed source row: only even rows hold pixels.
++                let Some(zy) = (y + ky).checked_sub(2).filter(|&v| v < h && v % 2 == 0) else { continue };
++                for (kx, wx) in TAPS.iter().enumerate() {
++                    let Some(zx) = (xx + kx).checked_sub(2).filter(|&v| v < w && v % 2 == 0) else { continue };
++                    let k = wy * wx / 16.0;
++                    let (sy, sx) = (zy / 2, zx / 2);
++                    if let Some(src) = x.d.get((sy * x.w + sx) * c..(sy * x.w + sx + 1) * c) {
++                        px.iter_mut().zip(src).for_each(|(p, s)| *p += s * k);
++                    }
++                }
++            }
++        }
++    });
++    out
++}
++
++// --- The weights file ------------------------------------------------------------------------------
++
++/// The largest tensor the file may declare (the biggest is 512×512).
++const MAX_TENSOR: usize = 1 << 22;
++
++/// Reads `JXMIGAN1`: a count, then per tensor a name (u16 length + UTF-8), its dimensions (u8
++/// count + u32 each) and its values as little-endian fp16. Hostile input gives an error.
++fn read_tensors(bytes: &[u8]) -> std::result::Result<HashMap<String, (Vec<usize>, Vec<f32>)>, String> {
++    const BAD: &str = "the local model is damaged";
++    let mut r = Reader { b: bytes, at: 0 };
++    if r.take(8).ok_or(BAD)? != b"JXMIGAN1" {
++        return Err(if bytes.is_empty() { "the local model is not in this build".into() } else { BAD.into() });
++    }
++    let count = r.u32().ok_or(BAD)? as usize;
++    if count > 1024 {
++        return Err(BAD.into());
++    }
++    let mut out = HashMap::with_capacity(count);
++    for _ in 0..count {
++        let len = r.u16().ok_or(BAD)? as usize;
++        let name = std::str::from_utf8(r.take(len).ok_or(BAD)?).map_err(|_| BAD)?.to_owned();
++        let dims = usize::from(r.take(1).and_then(|b| b.first().copied()).ok_or(BAD)?);
++        if dims > 4 {
++            return Err(BAD.into());
++        }
++        let mut shape = Vec::with_capacity(dims);
++        let mut n = 1usize;
++        for _ in 0..dims {
++            let d = r.u32().ok_or(BAD)? as usize;
++            n = n.checked_mul(d).filter(|&v| v <= MAX_TENSOR).ok_or(BAD)?;
++            shape.push(d);
++        }
++        let raw = r.take(n * 2).ok_or(BAD)?;
++        let values = raw.chunks_exact(2).map(|p| f16_to_f32(u16::from_le_bytes([p[0], p[1]]))).collect();
++        out.insert(name, (shape, values));
++    }
++    Ok(out)
++}
++
++struct Reader<'a> {
++    b: &'a [u8],
++    at: usize,
++}
++
++impl<'a> Reader<'a> {
++    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
++        let end = self.at.checked_add(n)?;
++        let s = self.b.get(self.at..end)?;
++        self.at = end;
++        Some(s)
++    }
++    fn u16(&mut self) -> Option<u16> {
++        self.take(2).map(|b| u16::from_le_bytes([b[0], b[1]]))
++    }
++    fn u32(&mut self) -> Option<u32> {
++        self.take(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
++    }
++}
++
++/// IEEE 754 half → single precision.
++fn f16_to_f32(h: u16) -> f32 {
++    let sign = u32::from(h >> 15) << 31;
++    let exp = u32::from((h >> 10) & 0x1f);
++    let man = u32::from(h & 0x3ff);
++    let bits = match (exp, man) {
++        (0, 0) => sign,
++        (0, m) => {
++            // Subnormal: normalise.
++            let shift = m.leading_zeros() - 21;
++            let m = (m << shift) & 0x3ff;
++            sign | ((113 - shift) << 23) | (m << 13)
++        }
++        (31, 0) => sign | 0x7f80_0000,
++        (31, m) => sign | 0x7f80_0000 | (m << 13),
++        (e, m) => sign | ((e + 112) << 23) | (m << 13),
++    };
++    f32::from_bits(bits)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn half_floats_decode() {
++        assert_eq!(f16_to_f32(0x3c00), 1.0);
++        assert_eq!(f16_to_f32(0xc000), -2.0);
++        assert_eq!(f16_to_f32(0x0000), 0.0);
++        assert_eq!(f16_to_f32(0x7bff), 65504.0);
++        assert!((f16_to_f32(0x0001) - 5.960_464_5e-8).abs() < 1e-12);
++        assert!((f16_to_f32(0x3555) - 0.333_251_95).abs() < 1e-6);
++    }
++
++    #[test]
++    fn a_damaged_file_is_an_error_not_a_panic() {
++        assert!(read_tensors(b"").is_err());
++        assert!(read_tensors(b"JXMIGAN1").is_err());
++        let mut b = b"JXMIGAN1".to_vec();
++        b.extend(1u32.to_le_bytes());
++        b.extend(1u16.to_le_bytes());
++        b.push(b'a');
++        b.push(2);
++        b.extend(u32::MAX.to_le_bytes());
++        b.extend(u32::MAX.to_le_bytes());
++        assert!(read_tensors(&b).is_err());
++        assert!(Model::load(b"JXMIGAN1\0\0\0\0").is_err());
++    }
++
++    #[test]
++    fn the_crop_is_a_square_around_the_hole_that_fits() {
++        let (w, h) = (2000, 1000);
++        let mut hole = vec![0u8; w * h];
++        hole[500 * w + 1000] = 1;
++        let (x0, x1, y0, y1) = crop_box(&hole, w, h).unwrap();
++        assert_eq!((x1 - x0, y1 - y0), (512, 512));
++        assert!(x0 <= 1000 && x1 > 1000 && y0 <= 500 && y1 > 500);
++        // Near a corner it slides inside the photo.
++        let mut hole = vec![0u8; w * h];
++        hole[3 * w + 2] = 1;
++        assert_eq!(crop_box(&hole, w, h), Some((0, 512, 0, 512)));
++        // A small photo is used whole.
++        let hole = vec![1u8; 300 * 200];
++        assert_eq!(crop_box(&hole, 300, 200), Some((0, 300, 0, 200)));
++        assert_eq!(crop_box(&[0; 16], 4, 4), None);
++    }
++
++    #[test]
++    fn a_thin_wire_survives_shrinking() {
++        let (w, h) = (2048, 64);
++        let mut hole = vec![0u8; w * h];
++        for y in 0..h {
++            hole[y * w + 1001] = 1;
++        }
++        let small = shrink_hole(&hole, w, h, 512, 16);
++        assert!(small.iter().filter(|&&v| v > 0).count() >= 16);
++    }
++
++    #[test]
++    fn resizing_keeps_flat_colour() {
++        let src = vec![100.0f32; 37 * 23 * 3];
++        for (dw, dh) in [(512, 512), (5, 3), (37, 23)] {
++            assert!(resize(&src, 37, 23, dw, dh, 3).iter().all(|v| (v - 100.0).abs() < 1e-3));
++        }
++    }
++
++    #[test]
++    fn bad_input_is_an_error_not_a_panic() {
++        assert!(remove(&[0; 16], 2, 2, &[0; 3]).is_err());
++        assert!(remove(&[0; 16], 2, 2, &[0; 4]).is_err(), "nothing to remove");
++        assert!(remove(&[], 0, 0, &[]).is_err());
++    }
++
++    #[test]
++    fn the_hole_is_filled_and_the_rest_kept() {
++        // A flat grey photo with a red square: removing the square gives back grey. (A photo
++        // much smaller than 512 px is stretched to it and fills worse: the original does too.)
++        let (w, h) = (400usize, 300usize);
++        let mut px = [120u8, 120, 120, 255].repeat(w * h);
++        let mut hole = vec![0u8; w * h];
++        for y in 100..160 {
++            for x in 150..210 {
++                px[(y * w + x) * 4..(y * w + x) * 4 + 3].copy_from_slice(&[220, 30, 40]);
++                hole[y * w + x] = 255;
++            }
++        }
++        let f = remove(&px, w as u32, h as u32, &hole).unwrap();
++        assert_eq!((f.x, f.y, f.width, f.height), (0, 0, 400, 300), "the crop is cut to the photo");
++        let at = |x: usize, y: usize| &f.rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
++        assert_eq!(at(20, 20), &[120, 120, 120, 255], "far from the hole the photo is untouched");
++        for (x, y) in [(180, 130), (160, 110), (200, 150)] {
++            assert!(at(x, y).iter().take(3).all(|&c| c.abs_diff(120) < 12), "({x}, {y}) = {:?}", at(x, y));
++        }
++    }
++}
 diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
-index 783d19f77..f4e85708d 100644
+index 783d19f77..1272abdfb 100644
 --- a/crates/engine/src/lib.rs
 +++ b/crates/engine/src/lib.rs
-@@ -27,6 +27,7 @@ pub mod inspect;
+@@ -27,6 +27,8 @@ pub mod inspect;
  pub mod installed_profiles;
  pub mod jobs;
  pub mod kys;
 +pub mod jacnex_ia;
++pub mod jacnex_migan;
  pub mod layer_place;
  pub mod layer_style;
  pub mod link_watch;
@@ -336,10 +1139,10 @@ index 49053405f..83e830587 100644
          {
 diff --git a/crates/ui-egui/src/jacnex_ia.rs b/crates/ui-egui/src/jacnex_ia.rs
 new file mode 100644
-index 000000000..3b43541e4
+index 000000000..7d57eff1c
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_ia.rs
-@@ -0,0 +1,2139 @@
+@@ -0,0 +1,2420 @@
 +//! Jacnex: la IA integrada de Photonex.
 +//!
 +//! Ocho herramientas, explicadas paso a paso en la ventana «IA de Jacnex» (Edición › Relleno
@@ -348,7 +1151,10 @@ index 000000000..3b43541e4
 +//! - **Relleno generativo**: la zona seleccionada (más un margen alrededor, para que la IA respete
 +//!   luz y perspectiva) y su máscara van al modelo elegido; el resultado vuelve como una **capa
 +//!   nueva** recortada por la selección. Sin selección edita la imagen entera o crea una nueva.
-+//! - **Quitar objeto**: lo mismo, con instrucciones para borrar lo seleccionado (y su sombra).
++//! - **Quitar objeto**: gratis en este equipo con MI-GAN (`photocraft_engine::jacnex_migan`, sin
++//!   cuenta ni conexión), o con Ideogram 3.0 (créditos) para zonas grandes o fondos complejos.
++//!   Relleno generativo con una selección usa Ideogram 3.0 (relleno con máscara) si no se elige
++//!   otro modelo.
 +//! - **Expandir imagen**: agranda el lienzo a una proporción y la IA dibuja lo que falta.
 +//! - **Quitar fondo** (Recraft): capa nueva con máscara del sujeto; el resto se oculta.
 +//! - **Generar fondo**: separa al sujeto y la IA crea un fondo nuevo detrás.
@@ -370,6 +1176,7 @@ index 000000000..3b43541e4
 +use egui::{Color32, RichText};
 +use photocraft_doc::{DocId, LayerId};
 +use photocraft_engine::jacnex_ia as motor;
++use photocraft_engine::jacnex_migan as migan;
 +use photocraft_geom::Rect;
 +use photocraft_raster::Surface;
 +
@@ -395,6 +1202,15 @@ index 000000000..3b43541e4
 +const MAX_BYTES_AMPLIAR: u64 = 9 * 1024 * 1024;
 +/// Más píxeles que esto no se procesan (memoria): unos 80 MP.
 +const MAX_PIXELES: u64 = 80_000_000;
++/// Ideogram 3.0 en Forgenex: rellena o borra la zona marcada (la máscara va en negro).
++const IDEOGRAM: &str = "ideogram-edit";
++/// Las proporciones de lo que se manda a Ideogram: una selección muy alargada se envía con más
++/// contexto, a lo sumo 3:1.
++const ASPECTOS_IDEOGRAM: &[(u32, u32)] = &[(1, 1), (4, 3), (3, 4), (3, 2), (2, 3), (16, 9), (9, 16), (2, 1), (1, 2), (3, 1), (1, 3)];
++/// El lado corto mínimo de lo que se manda a Ideogram: una selección pequeña se agranda.
++const MIN_LADO_IDEOGRAM: u32 = 512;
++const SELECCIONA_QUITAR: &str = "Primero selecciona lo que quieres quitar (Marco, Lazo, Selección de objetos…).";
++const DESCRIPCION_IDEOGRAM: &str = "Relleno preciso: solo cambia tu selección y respeta el resto de la foto.";
 +/// El contexto alrededor de la selección, como fracción de su tamaño.
 +const MARGEN: f32 = 0.15;
 +/// El fondo con que se aplanan las zonas transparentes o fuera del lienzo al enviarlas.
@@ -493,7 +1309,9 @@ index 000000000..3b43541e4
 +    fn ayuda(self) -> &'static str {
 +        match self {
 +            Herramienta::Relleno => "Añade o cambia lo que quieras dentro de una selección. Sin selección, edita o crea la imagen entera.",
-+            Herramienta::QuitarObjeto => "Borra lo seleccionado (personas, cables, manchas…) y rellena con lo que habría detrás.",
++            Herramienta::QuitarObjeto => {
++                "Borra lo seleccionado (personas, cables, manchas…) y rellena con lo que habría detrás. Gratis en tu PC, o con Ideogram para zonas difíciles."
++            }
 +            Herramienta::Expandir => "Agranda el lienzo a otra proporción y la IA dibuja lo que falta alrededor.",
 +            Herramienta::QuitarFondo => "Separa a la persona u objeto principal del fondo, en un clic.",
 +            Herramienta::GenerarFondo => "Deja al sujeto intacto y crea un fondo nuevo detrás, con luz que encaja.",
@@ -504,8 +1322,9 @@ index 000000000..3b43541e4
 +    }
 +
 +    /// Usa un modelo de imagen elegible (las otras usan una herramienta fija).
++    /// Quitar objeto elige entre MI-GAN e Ideogram, no un modelo de imagen.
 +    fn usa_modelo(self) -> bool {
-+        !matches!(self, Herramienta::QuitarFondo | Herramienta::MejorarResolucion)
++        !matches!(self, Herramienta::QuitarFondo | Herramienta::MejorarResolucion | Herramienta::QuitarObjeto)
 +    }
 +
 +    fn admite_variaciones(self) -> bool {
@@ -525,6 +1344,16 @@ index 000000000..3b43541e4
 +    fn admite_referencia(self) -> bool {
 +        matches!(self, Herramienta::Relleno | Herramienta::GenerarFondo | Herramienta::Expandir)
 +    }
++}
++
++/// Con qué se quita un objeto.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
++pub enum MotorQuitar {
++    /// MI-GAN en este equipo: gratis, sin cuenta ni conexión.
++    #[default]
++    Local,
++    /// Ideogram 3.0 en el servidor, con créditos.
++    Ideogram,
 +}
 +
 +/// Qué hacer cuando no hay selección (Relleno generativo).
@@ -733,6 +1562,8 @@ index 000000000..3b43541e4
 +    /// La barra contextual muestra el campo de texto.
 +    barra_expandida: bool,
 +    pub sin_seleccion: SinSeleccion,
++    /// Quitar objeto: en este equipo (gratis) o con Ideogram.
++    pub motor_quitar: MotorQuitar,
 +    info: Option<Info>,
 +    info_error: Option<String>,
 +    info_rx: Option<Receiver<Result<Info, String>>>,
@@ -778,6 +1609,26 @@ index 000000000..3b43541e4
 +            aspectos: Vec::new(),
 +            creditos: Vec::new(),
 +        })
++    }
++
++    /// Va a Ideogram: Quitar objeto con ese motor, o Relleno generativo con una selección y sin
++    /// otro modelo elegido.
++    fn usa_ideogram(&self, con_seleccion: bool) -> bool {
++        match self.herramienta {
++            Herramienta::QuitarObjeto => self.motor_quitar == MotorQuitar::Ideogram,
++            Herramienta::Relleno => con_seleccion && (self.modelo.is_empty() || self.modelo == IDEOGRAM),
++            _ => false,
++        }
++    }
++
++    /// Quitar objeto gratis, en este equipo.
++    fn quitar_local(&self) -> bool {
++        self.herramienta == Herramienta::QuitarObjeto && self.motor_quitar == MotorQuitar::Local
++    }
++
++    /// Lo que cuesta una imagen de Ideogram, según el servidor.
++    fn costo_ideogram(&self) -> Option<i64> {
++        self.herramienta_servidor(IDEOGRAM).and_then(|t| t.costo("unica"))
 +    }
 +
 +    fn herramienta_servidor(&self, id: &str) -> Option<&ModeloInfo> {
@@ -1229,6 +2080,23 @@ index 000000000..3b43541e4
 +/// `rect` agrandado (sin deformar lo que contiene) a la proporción de `aspectos` más cercana:
 +/// primero dentro de `lienzo`, y si no cabe, centrado sobre él (lo que sale fuera se rellena al
 +/// enviar y se descarta al colocar). Sin proporciones, `rect` tal cual.
++/// El tamaño de envío a Ideogram: lado largo ≤ 1536 y corto ≥ 512 (agrandando si hace falta).
++fn tamano_ideogram(w: u32, h: u32) -> (u32, u32) {
++    let (w, h) = caber(w, h, MAX_LADO);
++    let corto = w.min(h).max(1);
++    if corto >= MIN_LADO_IDEOGRAM {
++        return (w, h);
++    }
++    let f = MIN_LADO_IDEOGRAM as f32 / corto as f32;
++    caber(((w as f32 * f).round() as u32).max(1), ((h as f32 * f).round() as u32).max(1), MAX_LADO)
++}
++
++/// La máscara de Ideogram, que edita lo NEGRO: negro donde hay algo seleccionado, blanco el resto,
++/// sin grises.
++fn mascara_ideogram(cobertura: &[u8]) -> Vec<u8> {
++    cobertura.iter().map(|&v| if v > 0 { 0 } else { 255 }).collect()
++}
++
 +fn ajustar_aspecto(rect: Rect, lienzo: Rect, aspectos: &[(u32, u32)]) -> (Rect, Option<(u32, u32)>) {
 +    let (w, h) = (f64::from(rect.width().max(1)), f64::from(rect.height().max(1)));
 +    let Some(&a) = aspectos.iter().min_by(|x, y| {
@@ -1418,6 +2286,18 @@ index 000000000..3b43541e4
 +    }
 +}
 +
++/// Lo que Ideogram debe dibujar en la zona negra de la máscara: lo pedido, o fondo vacío.
++fn instrucciones_ideogram(quitar: bool, pedido: &str) -> String {
++    let pedido = pedido.trim();
++    if quitar || pedido.is_empty() {
++        "Empty background only: continue the surrounding scene, surfaces, textures and lighting seamlessly. \
++         No objects, no people, no text, and no shadows or reflections of anything removed."
++            .into()
++    } else {
++        format!("{pedido}. Photorealistic, matching the photo's lighting, perspective, colors and grain.")
++    }
++}
++
 +fn nombre_capa(prefijo: &str, pedido: &str) -> String {
 +    let p = pedido.trim();
 +    if p.is_empty() {
@@ -1448,7 +2328,8 @@ index 000000000..3b43541e4
 +    let h = e.herramienta;
 +    let con_seleccion = limites.is_some() && h.usa_seleccion();
 +    let zona = limites.filter(|_| con_seleccion).unwrap_or(lienzo);
-+    let n = if h.admite_variaciones() { i64::from(e.variaciones()) } else { 1 };
++    let ideogram = e.usa_ideogram(con_seleccion);
++    let n = if h.admite_variaciones() || ideogram { i64::from(e.variaciones()) } else { 1 };
 +    let m = e.modelo_actual();
 +    let costo_imagen = |r: Rect| -> Option<i64> {
 +        let (s, _) = ajustar_aspecto(r, lienzo, &m.aspectos);
@@ -1478,7 +2359,9 @@ index 000000000..3b43541e4
 +        _ => {
 +            let contexto = if con_seleccion { motor::context_rect(zona, lienzo, MARGEN) } else { lienzo };
 +            let falta = if h.pide_seleccion() && !con_seleccion {
-+                Some("Primero selecciona lo que quieres quitar (Marco, Lazo, Selección de objetos…).".into())
++                Some(SELECCIONA_QUITAR.into())
++            } else if e.quitar_local() && !migan::available() {
++                Some("Quitar objeto gratis no está disponible aquí: elige «Con IA · Ideogram».".into())
 +            } else if h == Herramienta::Texto && e.texto.trim().is_empty() {
 +                Some("Escribe el texto que quieres en la imagen.".into())
 +            } else if h == Herramienta::Relleno && !con_seleccion && e.prompt.trim().is_empty() {
@@ -1486,7 +2369,14 @@ index 000000000..3b43541e4
 +            } else {
 +                None
 +            };
-+            (costo_imagen(contexto).map(|c| c * n), falta)
++            let costo = if e.quitar_local() {
++                Some(0)
++            } else if ideogram {
++                e.costo_ideogram().map(|c| c * n)
++            } else {
++                costo_imagen(contexto).map(|c| c * n)
++            };
++            (costo, falta)
 +        }
 +    };
 +    let pixeles = u64::from(lienzo.width()) * u64::from(lienzo.height());
@@ -1539,7 +2429,96 @@ index 000000000..3b43541e4
 +    Some((cubrir(&px, r.width(), r.height(), w, h), w, h))
 +}
 +
++/// `mascara` (`w`×`h`, algo seleccionado = > 0) agrandada `r` píxeles en cada dirección (un
++/// cuadrado): dos pasadas por filas y columnas, cada una lineal.
++fn agrandar(mascara: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
++    // Una línea de `n` valores separados por `paso`: marca lo que está a `r` o menos de algo marcado.
++    fn linea(src: &[u8], dst: &mut [u8], ini: usize, paso: usize, n: usize, r: usize) {
++        let mut ultimo: Option<usize> = None;
++        for i in 0..n {
++            let k = ini + i * paso;
++            if src.get(k).is_some_and(|&v| v > 0) {
++                ultimo = Some(i);
++            }
++            if ultimo.is_some_and(|u| i - u <= r)
++                && let Some(d) = dst.get_mut(k)
++            {
++                *d = 255;
++            }
++        }
++        ultimo = None;
++        for i in (0..n).rev() {
++            let k = ini + i * paso;
++            if src.get(k).is_some_and(|&v| v > 0) {
++                ultimo = Some(i);
++            }
++            if ultimo.is_some_and(|u| u - i <= r)
++                && let Some(d) = dst.get_mut(k)
++            {
++                *d = 255;
++            }
++        }
++    }
++    if mascara.len() != w * h {
++        return mascara.to_vec();
++    }
++    let mut filas = vec![0u8; w * h];
++    for y in 0..h {
++        linea(mascara, &mut filas, y * w, 1, w, r);
++    }
++    let mut out = vec![0u8; w * h];
++    for x in 0..w {
++        linea(&filas, &mut out, x, w, h, r);
++    }
++    out
++}
++
++/// Quitar objeto gratis: MI-GAN en este equipo, en un hilo aparte; sin cuenta ni créditos.
++fn preparar_local(app: &PhotocraftApp) -> Result<Trabajo, String> {
++    let d = app.session.active().ok_or("Abre o crea un documento primero.")?;
++    let lienzo = d.doc.bounds();
++    let z = motor::zone(&app.session, MARGEN).ok_or("La selección está fuera del lienzo.")?;
++    let (Some(b), Some(sel)) = (z.selected, z.selection) else { return Err(SELECCIONA_QUITAR.into()) };
++    // Lo que se borra es la selección algo agrandada: el borde del objeto (que una selección
++    // ajustada deja dentro) no tiñe el relleno. La capa sigue recortada por la selección.
++    let r = (b.width().max(b.height()) / 50).clamp(4, 16);
++    // Lo que MI-GAN mira alrededor del objeto; el resto del lienzo no hace falta.
++    let m = migan::context_margin(b.width().saturating_add(2 * r), b.height().saturating_add(2 * r)).saturating_add(r);
++    let m = i32::try_from(m).unwrap_or(i32::MAX / 4);
++    let zona = Rect::new(b.x0.saturating_sub(m), b.y0.saturating_sub(m), b.x1.saturating_add(m), b.y1.saturating_add(m)).intersect(&lienzo);
++    if zona.is_empty() || u64::from(zona.width()) * u64::from(zona.height()) > MAX_PIXELES {
++        return Err("La zona es demasiado grande para quitarla en tu PC: prueba «Con IA · Ideogram».".into());
++    }
++    let mut px = vista(&d.doc, zona, lienzo);
++    let hueco = motor::coverage(&sel, zona);
++    let (w, h) = (zona.width(), zona.height());
++    let rx = en_hilo(move |tx: Sender<Evento>| {
++        let _ = tx.send(Evento::Etapa("Quitando el objeto en tu PC…"));
++        let hueco = agrandar(&hueco, w as usize, h as usize, r as usize);
++        let r = migan::remove(&px, w, h, &hueco).map(|f| {
++            // Lo rellenado vuelve a su sitio dentro de la zona.
++            let (fw, zw) = (f.width as usize * 4, w as usize * 4);
++            for (fy, fila) in f.rgba.chunks_exact(fw.max(1)).enumerate() {
++                let ini = (f.y as usize + fy) * zw + f.x as usize * 4;
++                if let Some(dst) = px.get_mut(ini..ini + fila.len()) {
++                    dst.copy_from_slice(fila);
++                }
++            }
++            px
++        });
++        let _ = tx.send(match r {
++            Ok(rgba) => Evento::Listo(Resultados { imagenes: vec![Img { rgba, ancho: w, alto: h }], alfa: None, fallidas: 0 }),
++            Err(e) => Evento::Error(format!("No se pudo quitar el objeto: {e}")),
++        });
++    });
++    let accion = Accion::Capa { zona, mascara: Some(sel), nombre: nombre_capa("Objeto quitado", "") };
++    Ok(Trabajo { doc: d.doc.id, accion, inicio: Instant::now(), etapa: "Preparando…", rx, listo: None })
++}
++
 +fn preparar(app: &PhotocraftApp) -> Result<Trabajo, String> {
++    if app.jacnex_ia.quitar_local() {
++        return preparar_local(app);
++    }
 +    let conexion = conexion(&app.jacnex_ia).ok_or("Inicia sesión en Jacnex Studio para usar la IA.")?;
 +    let e = &app.jacnex_ia;
 +    let d = app.session.active().ok_or("Abre o crea un documento primero.")?;
@@ -1549,7 +2528,7 @@ index 000000000..3b43541e4
 +    }
 +    let h = e.herramienta;
 +    let m = e.modelo_actual();
-+    let n = if h.admite_variaciones() { e.variaciones() } else { 1 };
++    let n = if h.admite_variaciones() || e.usa_ideogram(true) { e.variaciones() } else { 1 };
 +    let refe = if h.admite_referencia() { referencia(app) } else { None };
 +    let con_ref = refe.is_some();
 +    let nombre_doc = d.doc.name.clone();
@@ -1599,25 +2578,47 @@ index 000000000..3b43541e4
 +        Herramienta::Relleno | Herramienta::QuitarObjeto | Herramienta::Texto | Herramienta::Retoque => {
 +            let z = motor::zone(&app.session, MARGEN).ok_or("La selección está fuera del lienzo.")?;
 +            let con_sel = z.selected.is_some() && h.usa_seleccion();
-+            let crear = h == Herramienta::Relleno && !con_sel && e.sin_seleccion == SinSeleccion::CrearNueva;
-+            let contexto = if con_sel { z.context } else { lienzo };
-+            let (s, _) = ajustar_aspecto(contexto, lienzo, &m.aspectos);
-+            let px = (!crear).then(|| vista(&d.doc, s, lienzo));
-+            let mascara = if con_sel { z.selection.as_ref().map(|sel| motor::coverage(sel, s)) } else { None };
-+            let im = a_envio(contexto, px, mascara);
-+            let prefijo = match h {
-+                Herramienta::QuitarObjeto => "Objeto quitado",
-+                Herramienta::Texto => "Texto",
-+                Herramienta::Retoque => RETOQUES.get(e.retoque).map_or("Retoque", |r| r.0),
-+                _ => "Relleno",
-+            };
-+            let nombre = match h {
-+                Herramienta::Texto => nombre_capa(prefijo, &e.texto),
-+                Herramienta::QuitarObjeto | Herramienta::Retoque => nombre_capa(prefijo, ""),
-+                _ => nombre_capa(prefijo, &e.prompt),
-+            };
-+            let envio = envio_modelo(&im, prompt(con_sel))?;
-+            (Accion::Capa { zona: im.zona, mascara: if con_sel { z.selection } else { None }, nombre }, Some(envio), None)
++            if e.usa_ideogram(con_sel) {
++                let sel = z.selection.as_ref().filter(|_| con_sel).ok_or(SELECCIONA_QUITAR)?;
++                let (s, _) = ajustar_aspecto(z.context, lienzo, ASPECTOS_IDEOGRAM);
++                let (w, hh) = (s.width(), s.height());
++                let (ew, eh) = tamano_ideogram(w, hh);
++                let foto = jpg(&cubrir(&vista(&d.doc, s, lienzo), w, hh, ew, eh), ew, eh, "imagen.jpg")?;
++                let mascara = png_gris(mascara_ideogram(&escalar_gris(&motor::coverage(sel, s), w, hh, ew, eh)), ew, eh)?;
++                let quitar = h == Herramienta::QuitarObjeto;
++                let nombre = if quitar { nombre_capa("Objeto quitado", "") } else { nombre_capa("Relleno", &e.prompt) };
++                let envio = Envio {
++                    modelo: IDEOGRAM.into(),
++                    prompt: instrucciones_ideogram(quitar, &e.prompt),
++                    tamano: None,
++                    aspecto: None,
++                    resolucion: None,
++                    factor: None,
++                    n,
++                    imagenes: vec![foto, mascara],
++                };
++                (Accion::Capa { zona: s, mascara: z.selection, nombre }, Some(envio), None)
++            } else {
++                let crear = h == Herramienta::Relleno && !con_sel && e.sin_seleccion == SinSeleccion::CrearNueva;
++                let contexto = if con_sel { z.context } else { lienzo };
++                let (s, _) = ajustar_aspecto(contexto, lienzo, &m.aspectos);
++                let px = (!crear).then(|| vista(&d.doc, s, lienzo));
++                let mascara = if con_sel { z.selection.as_ref().map(|sel| motor::coverage(sel, s)) } else { None };
++                let im = a_envio(contexto, px, mascara);
++                let prefijo = match h {
++                    Herramienta::QuitarObjeto => "Objeto quitado",
++                    Herramienta::Texto => "Texto",
++                    Herramienta::Retoque => RETOQUES.get(e.retoque).map_or("Retoque", |r| r.0),
++                    _ => "Relleno",
++                };
++                let nombre = match h {
++                    Herramienta::Texto => nombre_capa(prefijo, &e.texto),
++                    Herramienta::QuitarObjeto | Herramienta::Retoque => nombre_capa(prefijo, ""),
++                    _ => nombre_capa(prefijo, &e.prompt),
++                };
++                let envio = envio_modelo(&im, prompt(con_sel))?;
++                (Accion::Capa { zona: im.zona, mascara: if con_sel { z.selection } else { None }, nombre }, Some(envio), None)
++            }
 +        }
 +        Herramienta::Expandir => {
 +            let (nw, nh) = lienzo_expandido(lienzo.width(), lienzo.height(), e.proporcion).ok_or("La imagen ya tiene esa proporción: elige otra.")?;
@@ -1908,6 +2909,7 @@ index 000000000..3b43541e4
 +
 +fn boton_generar(ui: &mut egui::Ui, costo: Option<i64>, activo: bool) -> egui::Response {
 +    let texto = match costo {
++        Some(0) => "Generar · gratis".to_string(),
 +        Some(c) => format!("Generar · {c} créditos"),
 +        None => "Generar".to_string(),
 +    };
@@ -1977,7 +2979,7 @@ index 000000000..3b43541e4
 +            if !sesion {
 +                ui.separator();
 +                ui.label("Para usar la IA, abre Jacnex Studio e inicia sesión con tu cuenta. Tus créditos son los de app.jacnex.store.");
-+                return;
++                ui.small("Sin sesión funciona «Quitar objeto» gratis, en tu PC.");
 +            }
 +            if let Some(i) = &e.info
 +                && !i.nombre.is_empty()
@@ -2029,23 +3031,56 @@ index 000000000..3b43541e4
 +    ui.add_space(4.0);
 +
 +    // Modelo.
++    let ideogram = e.usa_ideogram(p.con_seleccion);
++    if h == Herramienta::QuitarObjeto {
++        ui.horizontal(|ui| {
++            ui.label("Cómo:");
++            ui.selectable_value(&mut e.motor_quitar, MotorQuitar::Local, "Gratis · en tu PC")
++                .on_hover_text("MI-GAN, en tu computadora: sin conexión ni créditos. Ideal para cables, manchas, personas pequeñas y fondos sencillos.");
++            let ideo = match e.costo_ideogram() {
++                Some(c) => format!("Con IA · Ideogram ({c} cr.)"),
++                None => "Con IA · Ideogram".to_string(),
++            };
++            ui.selectable_value(&mut e.motor_quitar, MotorQuitar::Ideogram, ideo)
++                .on_hover_text("Ideogram 3.0, en la nube: mejor en zonas grandes o fondos complejos. Cobra créditos.");
++        });
++        ui.small(match e.motor_quitar {
++            MotorQuitar::Local => "Gratis: se calcula en tu PC en unos segundos, sin internet ni cuenta.",
++            MotorQuitar::Ideogram => "Ideogram 3.0 rellena con más detalle. Cada variación se cobra.",
++        });
++        ui.add_space(4.0);
++    }
 +    if h.usa_modelo() {
 +        let actual = e.modelo_actual();
++        let ofrece_ideogram = h == Herramienta::Relleno && p.con_seleccion;
++        let costo_ideo = e.costo_ideogram();
++        let elegido = if ideogram { "Ideogram 3.0".to_string() } else { actual.nombre.clone() };
 +        ui.horizontal(|ui| {
 +            ui.label("Modelo:");
-+            craft_ui::ComboBox::from_id_salt("jacnex-ia-modelo").width(230.0).selected_text(actual.nombre.clone()).show_ui(ui, |ui| {
++            craft_ui::ComboBox::from_id_salt("jacnex-ia-modelo").width(230.0).selected_text(elegido).show_ui(ui, |ui| {
++                if ofrece_ideogram {
++                    let texto = match costo_ideo {
++                        Some(c) => format!("Ideogram 3.0 · {c} (recomendado)"),
++                        None => "Ideogram 3.0 (recomendado)".to_string(),
++                    };
++                    if ui.selectable_label(ideogram, texto).on_hover_text(DESCRIPCION_IDEOGRAM).clicked() {
++                        e.modelo = IDEOGRAM.into();
++                    }
++                }
 +                for m in e.modelos() {
 +                    let texto = match m.costo("1k") {
 +                        Some(c) => format!("{} · desde {c}", m.nombre),
 +                        None => m.nombre.clone(),
 +                    };
-+                    if ui.selectable_label(m.id == actual.id, texto).on_hover_text(m.descripcion.as_str()).clicked() {
++                    if ui.selectable_label(!ideogram && m.id == actual.id, texto).on_hover_text(m.descripcion.as_str()).clicked() {
 +                        e.modelo = m.id.clone();
 +                    }
 +                }
 +            });
 +        });
-+        if !actual.descripcion.is_empty() {
++        if ideogram {
++            ui.small(DESCRIPCION_IDEOGRAM);
++        } else if !actual.descripcion.is_empty() {
 +            ui.small(actual.descripcion.as_str());
 +        }
 +        if h == Herramienta::Texto && actual.id != MODELO_TEXTO {
@@ -2125,7 +3160,7 @@ index 000000000..3b43541e4
 +            ideas(ui, &mut e.prompt, if p.con_seleccion { IDEAS_SELECCION } else { IDEAS_LIENZO });
 +        }
 +        Herramienta::QuitarObjeto => {
-+            ui.label("Nada que escribir: la IA borra lo seleccionado y rellena con lo que habría detrás.");
++            ui.label("Nada que escribir: se borra lo seleccionado y se rellena con lo que habría detrás.");
 +        }
 +        Herramienta::Expandir => {
 +            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Opcional: qué poner en lo nuevo").desired_width(f32::INFINITY));
@@ -2156,7 +3191,7 @@ index 000000000..3b43541e4
 +            ui.add(egui::TextEdit::singleline(&mut e.prompt).hint_text("Algo más (opcional)").desired_width(f32::INFINITY));
 +        }
 +    }
-+    if h.admite_referencia() && !otros.is_empty() {
++    if h.admite_referencia() && !ideogram && !otros.is_empty() {
 +        ui.horizontal(|ui| {
 +            ui.label("Referencia:");
 +            let nombre = e.referencia.and_then(|id| otros.iter().find(|o| o.0 == id)).map_or("Ninguna".to_string(), |o| o.1.clone());
@@ -2174,7 +3209,7 @@ index 000000000..3b43541e4
 +
 +    // Paso 3: generar.
 +    ui.label(RichText::new("3 · Generar").strong());
-+    if h.admite_variaciones() {
++    if h.admite_variaciones() || ideogram {
 +        ui.horizontal(|ui| {
 +            ui.label("Variaciones:");
 +            for n in 1..=3u32 {
@@ -2319,7 +3354,11 @@ index 000000000..3b43541e4
 +            }
 +            pedir_info(e);
 +        }
-+        if ui.add(egui::Button::new("Quitar objeto").frame(false)).on_hover_text("Borra lo seleccionado y rellena con lo que habría detrás").clicked() {
++        let ayuda = match e.motor_quitar {
++            MotorQuitar::Local => "Gratis, en tu PC: borra lo seleccionado y rellena con lo de alrededor",
++            MotorQuitar::Ideogram => "Con Ideogram (créditos): borra lo seleccionado y rellena con lo que habría detrás",
++        };
++        if ui.add(egui::Button::new("Quitar objeto").frame(false)).on_hover_text(ayuda).clicked() {
 +            pedir_info(e);
 +            pedido = Barra::QuitarObjeto;
 +        }
@@ -2473,6 +3512,51 @@ index 000000000..3b43541e4
 +    }
 +
 +    #[test]
++    fn ideogram_gets_a_black_mask_and_a_size_it_accepts() {
++        // A small selection is sent bigger: the short side reaches 512.
++        assert_eq!(tamano_ideogram(156, 104), (768, 512));
++        assert_eq!(tamano_ideogram(3000, 2000), (1536, 1024));
++        assert_eq!(tamano_ideogram(800, 600), (800, 600));
++        // Ideogram edits what is black; any coverage counts.
++        assert_eq!(mascara_ideogram(&[0, 1, 128, 255]), vec![255, 0, 0, 0]);
++        assert!(instrucciones_ideogram(true, "flores").starts_with("Empty background"));
++        assert!(instrucciones_ideogram(false, "  ").starts_with("Empty background"));
++        assert!(instrucciones_ideogram(false, "un gato").starts_with("un gato. Photorealistic"));
++    }
++
++    #[test]
++    fn the_area_to_erase_grows_a_few_pixels() {
++        // 7×5 with one pixel in the middle, grown 2: a 5×5 square, cut at the top and bottom.
++        let mut m = vec![0u8; 35];
++        m[2 * 7 + 3] = 200;
++        let g = agrandar(&m, 7, 5, 2);
++        for y in 0..5 {
++            for x in 0..7 {
++                assert_eq!(g[y * 7 + x] > 0, (1..=5).contains(&x), "({x}, {y})");
++            }
++        }
++        assert_eq!(agrandar(&[0, 0, 0], 3, 1, 4), vec![0, 0, 0]);
++        assert_eq!(agrandar(&[1, 2], 3, 1, 1), vec![1, 2], "a size that does not match is left alone");
++    }
++
++    #[test]
++    fn remove_object_is_local_by_default_and_fill_uses_ideogram_with_a_selection() {
++        let mut e = Estado::default();
++        e.elegir_herramienta(Herramienta::QuitarObjeto);
++        assert!(e.quitar_local() && !e.usa_ideogram(true));
++        e.motor_quitar = MotorQuitar::Ideogram;
++        assert!(!e.quitar_local() && e.usa_ideogram(false));
++        e.elegir_herramienta(Herramienta::Relleno);
++        assert!(e.usa_ideogram(true) && !e.usa_ideogram(false));
++        e.modelo = "gpt-image-2".into();
++        assert!(!e.usa_ideogram(true));
++        e.modelo = IDEOGRAM.into();
++        assert!(e.usa_ideogram(true));
++        e.elegir_herramienta(Herramienta::Texto);
++        assert!(!e.usa_ideogram(true) && !e.quitar_local());
++    }
++
++    #[test]
 +    fn the_server_override_is_only_for_this_machine() {
 +        assert!(es_local("http://127.0.0.1:3000"));
 +        assert!(!es_local("https://app.jacnex.store"));
@@ -2542,14 +3626,16 @@ index e4bdc7a66..84669abaf 100644
          i if crate::links::url_for(i).is_some() => true,
 diff --git a/crates/ui-egui/tests/it/jacnex_ia.rs b/crates/ui-egui/tests/it/jacnex_ia.rs
 new file mode 100644
-index 000000000..493fa1247
+index 000000000..34427686c
 --- /dev/null
 +++ b/crates/ui-egui/tests/it/jacnex_ia.rs
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,480 @@
 +//! Jacnex: la IA integrada (`jacnex_ia`). Con una selección, la barra contextual ofrece
 +//! «Relleno generativo»; Generar envía la zona y su máscara al servidor, y el resultado vuelve como
 +//! una capa nueva recortada por la selección (un solo paso de historial). Las demás herramientas
 +//! (variaciones, Quitar fondo, Generar fondo, Expandir, Mejorar resolución) se prueban igual.
++//! Relleno con selección va a Ideogram 3.0 (foto + máscara negra); Quitar objeto se hace gratis en
++//! este equipo (MI-GAN, sin pedir nada al servidor) o con Ideogram.
 +//!
 +//! La app entera corre en un arnés de egui_kittest; el servidor es uno falso en 127.0.0.1 que
 +//! responde como /v1/jacnex de Forgenex. Con `JACNEX_IA_PRUEBA=<url>|<llave>` la prueba de la barra
@@ -2677,6 +3763,7 @@ index 000000000..493fa1247
 +                let v = json!({"nombre": "Prueba", "creditos": 100, "modelos": [
 +                    {"id": "nano-banana", "nombre": "Nano Banana", "proveedor": "Google", "tipo": "imagen", "descripcion": "Económico", "aspectos": gemini, "creditos": {"unica": 9}},
 +                    {"id": "gpt-image-2", "nombre": "GPT Image 2", "proveedor": "OpenAI", "tipo": "imagen", "descripcion": "Texto", "aspectos": ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"], "creditos": {"1k": 15, "2k": 25, "4k": 40}},
++                    {"id": "ideogram-edit", "nombre": "Ideogram 3.0", "proveedor": "Ideogram", "tipo": "herramienta", "aspectos": [], "creditos": {"unica": 7}},
 +                    {"id": "quitar-fondo", "nombre": "Quitar fondo", "proveedor": "Recraft", "tipo": "herramienta", "aspectos": [], "creditos": {"unica": 5}},
 +                    {"id": "mejorar-resolucion", "nombre": "Mejorar resolución", "proveedor": "Topaz Labs", "tipo": "herramienta", "aspectos": [], "creditos": {"x2": 25, "x4": 50}}
 +                ]});
@@ -2759,8 +3846,8 @@ index 000000000..493fa1247
 +    h.run_steps(4);
 +    h.state_mut().jacnex_ia.prompt = "flores rojas".into();
 +    let inicio = Instant::now();
-+    // El costo llega del servidor: «Generar · 9 créditos».
-+    while h.query_all_by_label_contains("9 créditos").next().is_none() {
++    // El costo llega del servidor: Ideogram, «Generar · 7 créditos».
++    while h.query_all_by_label_contains("7 créditos").next().is_none() {
 +        assert!(inicio.elapsed() < Duration::from_secs(10) || recibido.is_none(), "no llegó el costo");
 +        if inicio.elapsed() > Duration::from_secs(10) {
 +            break;
@@ -2794,13 +3881,14 @@ index 000000000..493fa1247
 +        let r = r.lock().unwrap();
 +        assert_eq!(r.generar.len(), 1);
 +        let cuerpo = &r.generar[0];
-+        assert_eq!(campo(cuerpo, "model").as_deref(), Some("nano-banana"));
-+        assert!(cuerpo.contains("flores rojas"));
++        assert_eq!(campo(cuerpo, "model").as_deref(), Some("ideogram-edit"));
++        assert!(cuerpo.contains("flores rojas. Photorealistic"));
 +        assert_eq!(cuerpo.matches("name=\"image\"").count(), 2, "la zona y su máscara");
 +        assert!(cuerpo.contains("Content-Type: image/jpeg"), "la foto va en JPEG");
-+        // 120×80 más un 15 % a cada lado: 156×104 (dentro del lienzo), que ya es 3:2.
-+        assert_eq!(campo(cuerpo, "size").as_deref(), Some("156x104"));
-+        assert_eq!(campo(cuerpo, "aspect").as_deref(), Some("3:2"));
++        assert!(cuerpo.contains("Content-Type: image/png"), "la máscara en PNG");
++        // Ideogram no lleva tamaño ni proporción: la imagen y la máscara ya la tienen.
++        assert_eq!(campo(cuerpo, "size"), None);
++        assert_eq!(campo(cuerpo, "aspect"), None);
 +        assert_eq!(campo(cuerpo, "n").as_deref(), Some("1"));
 +    }
 +
@@ -2932,6 +4020,59 @@ index 000000000..493fa1247
 +    assert!(!ia::ocupado(h.state()));
 +    assert!(h.state().jacnex_ia_aviso().is_some_and(|m| m.contains("selecciona")), "{:?}", h.state().jacnex_ia_aviso());
 +    assert!(recibido.lock().unwrap().generar.is_empty());
++}
++
++#[test]
++fn remove_object_is_free_on_this_pc_and_asks_the_server_nothing() {
++    let (mut h, recibido) = conectado();
++    // Un cuadrado rojo sobre el fondo blanco, seleccionado.
++    h.state_mut().run("select.rect", json!({"x": 150, "y": 100, "width": 60, "height": 60, "antiAlias": false})).unwrap();
++    h.state_mut().run("edit.fill", json!({"color": "#dc1e28"})).unwrap();
++    h.run_steps(4);
++    assert_eq!(pixel(h.state(), 180, 130), ROJO);
++    let capas = h.state().session.active().unwrap().doc.layers.len();
++    h.get_by_label("Quitar objeto").click();
++    h.run_steps(2);
++    let inicio = Instant::now();
++    while ia::hay_trabajo(h.state()) {
++        assert!(inicio.elapsed() < Duration::from_secs(120), "no terminó");
++        h.run_steps(2);
++        std::thread::sleep(Duration::from_millis(100));
++    }
++    h.run_steps(4);
++    let d = h.state().session.active().unwrap();
++    assert_eq!(d.doc.layers.len(), capas + 1, "{:?}", h.state().jacnex_ia_aviso());
++    let capa = d.doc.layer(d.active_layer.unwrap()).unwrap();
++    assert_eq!(capa.name, "IA · Objeto quitado");
++    assert!(capa.mask.is_some(), "recortada por la selección");
++    // Lo rojo se rellena con el blanco de alrededor.
++    for (x, y) in [(180, 130), (152, 102), (208, 158)] {
++        let p = pixel(h.state(), x, y);
++        assert!(p.iter().take(3).all(|&c| c > 200), "({x}, {y}) = {p:?}");
++    }
++    assert_eq!(pixel(h.state(), 100, 100), BLANCO);
++    assert!(recibido.lock().unwrap().generar.is_empty(), "gratis: nada al servidor");
++    h.state_mut().run("edit.undo", json!({})).unwrap();
++    assert_eq!(h.state().session.active().unwrap().doc.layers.len(), capas);
++}
++
++#[test]
++fn remove_object_with_ideogram_sends_a_photo_and_a_black_mask() {
++    let (mut h, recibido) = conectado();
++    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 120, "height": 80, "antiAlias": false})).unwrap();
++    h.run_steps(4);
++    let e = &mut h.state_mut().jacnex_ia;
++    e.herramienta = Herramienta::QuitarObjeto;
++    e.motor_quitar = ia::MotorQuitar::Ideogram;
++    generar_y_esperar(&mut h);
++    assert_eq!(pixel(h.state(), 160, 140), ROJO, "{:?}", h.state().jacnex_ia_aviso());
++    assert_eq!(pixel(h.state(), 90, 90), BLANCO);
++    let r = recibido.lock().unwrap();
++    assert_eq!(r.generar.len(), 1);
++    let cuerpo = &r.generar[0];
++    assert_eq!(campo(cuerpo, "model").as_deref(), Some("ideogram-edit"));
++    assert!(cuerpo.contains("Empty background only"));
++    assert_eq!(cuerpo.matches("name=\"image\"").count(), 2, "la foto y su máscara");
 +}
 +
 +#[test]

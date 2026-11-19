@@ -107,6 +107,8 @@ def aplicar_diseno(carpeta, proyecto):
 
     Se generan desde una copia de trabajo ya con el cambio de marca, así que se aplican después de
     él. Si ArtCraft cambió el código que un parche toca, git lo rechaza y la compilación se detiene.
+    Después copia parches/<proyecto>/archivos/ tal cual: archivos binarios, como pesos de modelos,
+    que no van dentro de un parche de texto. No reemplaza un archivo que ya exista.
     """
     carpeta_parches = RAIZ / "parches" / proyecto
     if not carpeta_parches.is_dir():
@@ -119,6 +121,16 @@ def aplicar_diseno(carpeta, proyecto):
         )
         if resultado.returncode != 0:
             raise ErrorDeParche(f"el parche {archivo.name} no se pudo aplicar:\n{resultado.stderr.strip()}")
+    archivos = carpeta_parches / "archivos"
+    if archivos.is_dir():
+        for fuente in sorted(archivos.rglob("*")):
+            if not fuente.is_file():
+                continue
+            objetivo = Path(carpeta) / fuente.relative_to(archivos)
+            if objetivo.exists():
+                raise ErrorDeParche(f"{objetivo} ya existe: el original trae ahora ese archivo")
+            objetivo.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(fuente, objetivo)
     return len(lista)
 
 
