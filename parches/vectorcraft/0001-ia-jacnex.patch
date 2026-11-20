@@ -1,0 +1,1768 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 5c2bdbd..a82c189 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -6851,6 +6851,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "toml",
++ "ureq",
+  "vectorcraft-brush",
+  "vectorcraft-cad",
+  "vectorcraft-color",
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index 519724c..2bf31f6 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -54,6 +54,8 @@ log = { workspace = true }
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ craft-ui = { workspace = true, features = ["native-windows"] }
+ craft-update = { workspace = true }
++# La IA de Jacnex (src/jacnex_ia.rs): ya está en Cargo.lock por craft-update.
++ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "_ring", "gzip", "platform-verifier"] }
+ 
+ [target.'cfg(target_arch = "wasm32")'.dependencies]
+ # `now_ms` (src/lib.rs) reads the page's `performance.now()` with this crate in the web build. It is
+diff --git a/crates/ui-egui/src/app.rs b/crates/ui-egui/src/app.rs
+index 0bac58c..c59fd6f 100644
+--- a/crates/ui-egui/src/app.rs
++++ b/crates/ui-egui/src/app.rs
+@@ -153,6 +153,7 @@ impl VectorcraftApp {
+             plugin_runs: Default::default(),
+             placing: Default::default(),
+             trace_runs: Default::default(),
++            jacnex_ia: Default::default(),
+             recovery: Default::default(),
+             host_modifiers: Default::default(),
+             forwarded: Vec::new(),
+@@ -605,6 +606,7 @@ impl VectorcraftApp {
+         export_progress::show(self, &ctx);
+         plugin_runs::show(self, &ctx);
+         trace_runs::show(self, &ctx);
++        crate::jacnex_ia::ventana(self, &ctx);
+         opening::show(self, &ctx);
+         palette::show(self, &ctx);
+         // After every panel had its chance to draw in this pass.
+diff --git a/crates/ui-egui/src/i18n/bg.tsv b/crates/ui-egui/src/i18n/bg.tsv
+index ed7f3a8..bcdb8b2 100644
+--- a/crates/ui-egui/src/i18n/bg.tsv
++++ b/crates/ui-egui/src/i18n/bg.tsv
+@@ -6567,3 +6567,4 @@ breakText	Glyphs	Глифи
+ # Deferred plug-in effects
+ 	Refresh Deferred Effects	Обновяване на отложените ефекти
+ 	Deferred Effects	Отложени ефекти
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/bs.tsv b/crates/ui-egui/src/i18n/bs.tsv
+index 535ac3a..0018abb 100644
+--- a/crates/ui-egui/src/i18n/bs.tsv
++++ b/crates/ui-egui/src/i18n/bs.tsv
+@@ -6618,3 +6618,4 @@ shape	Open	Otvoren
+ # Deferred plug-in effects
+ 	Refresh Deferred Effects	Osvježi odgođene efekte
+ 	Deferred Effects	Odgođeni efekti
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/ca.tsv b/crates/ui-egui/src/i18n/ca.tsv
+index 1b58abe..61ccd48 100644
+--- a/crates/ui-egui/src/i18n/ca.tsv
++++ b/crates/ui-egui/src/i18n/ca.tsv
+@@ -6834,3 +6834,4 @@ breakText	Glyphs	Glifs
+ 	Deferred Effects	Efectes ajornats
+ @msg	no plug-in effect is deferred	no hi ha cap efecte de complement ajornat
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	S’ha obert amb {n} efecte de complement ajornat. Efecte › Actualitza els efectes ajornats l’executa.|S’ha obert amb {n} efectes de complement ajornats. Efecte › Actualitza els efectes ajornats els executa.
++	Jacnex AI…	IA de Jacnex…
+diff --git a/crates/ui-egui/src/i18n/cs.tsv b/crates/ui-egui/src/i18n/cs.tsv
+index 036d854..0931d2b 100644
+--- a/crates/ui-egui/src/i18n/cs.tsv
++++ b/crates/ui-egui/src/i18n/cs.tsv
+@@ -6853,3 +6853,4 @@ breakText	Glyphs	Glyfy
+ 	Deferred Effects	Odložené efekty
+ @msg	no plug-in effect is deferred	žádný efekt zásuvného modulu není odložen
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Otevřeno s {n} odloženým efektem zásuvného modulu. Efekt › Obnovit odložené efekty jej spustí.|Otevřeno s {n} odloženými efekty zásuvných modulů. Efekt › Obnovit odložené efekty je spustí.|Otevřeno s {n} odloženými efekty zásuvných modulů. Efekt › Obnovit odložené efekty je spustí.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/da.tsv b/crates/ui-egui/src/i18n/da.tsv
+index 51db07a..b96bf68 100644
+--- a/crates/ui-egui/src/i18n/da.tsv
++++ b/crates/ui-egui/src/i18n/da.tsv
+@@ -6581,3 +6581,4 @@ breakText	Glyphs	Glyffer
+ # Deferred plug-in effects
+ 	Refresh Deferred Effects	Opdatér udskudte effekter
+ 	Deferred Effects	Udskudte effekter
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/de.tsv b/crates/ui-egui/src/i18n/de.tsv
+index 1cf6f47..b64eb57 100644
+--- a/crates/ui-egui/src/i18n/de.tsv
++++ b/crates/ui-egui/src/i18n/de.tsv
+@@ -6440,3 +6440,4 @@ breakText	Glyphs	Glyphen
+ 	Deferred Effects	Zurückgestellte Effekte
+ @msg	no plug-in effect is deferred	kein Plug-in-Effekt ist zurückgestellt
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Mit {n} zurückgestelltem Plug-in-Effekt geöffnet. Effekt › Zurückgestellte Effekte aktualisieren führt ihn aus.|Mit {n} zurückgestellten Plug-in-Effekten geöffnet. Effekt › Zurückgestellte Effekte aktualisieren führt sie aus.
++	Jacnex AI…	Jacnex-KI…
+diff --git a/crates/ui-egui/src/i18n/el.tsv b/crates/ui-egui/src/i18n/el.tsv
+index a3087d0..15d4122 100644
+--- a/crates/ui-egui/src/i18n/el.tsv
++++ b/crates/ui-egui/src/i18n/el.tsv
+@@ -6805,3 +6805,4 @@ breakText	Glyphs	Γλύφοι
+ 	Deferred Effects	Εφέ σε αναμονή
+ @msg	no plug-in effect is deferred	κανένα εφέ προσθέτου δεν είναι σε αναμονή
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Άνοιξε με {n} εφέ προσθέτου σε αναμονή. Το Εφέ › Ανανέωση εφέ σε αναμονή το εκτελεί.|Άνοιξε με {n} εφέ προσθέτων σε αναμονή. Το Εφέ › Ανανέωση εφέ σε αναμονή τα εκτελεί.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index fb22646..74825b2 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -6796,3 +6796,4 @@ breakText	Glyphs	Glifos
+ 	Deferred Effects	Efectos aplazados
+ @msg	no plug-in effect is deferred	no hay ningún efecto de plugin aplazado
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Se abrió con {n} efecto de plugin aplazado. Efecto › Actualizar efectos aplazados lo ejecuta.|Se abrió con {n} efectos de plugin aplazados. Efecto › Actualizar efectos aplazados los ejecuta.
++	Jacnex AI…	IA de Jacnex…
+diff --git a/crates/ui-egui/src/i18n/fi.tsv b/crates/ui-egui/src/i18n/fi.tsv
+index 83132ad..3280fc6 100644
+--- a/crates/ui-egui/src/i18n/fi.tsv
++++ b/crates/ui-egui/src/i18n/fi.tsv
+@@ -6888,3 +6888,4 @@ breakText	Glyphs	Merkit
+ 	Deferred Effects	Lykätyt tehosteet
+ @msg	no plug-in effect is deferred	yhtään laajennustehostetta ei ole lykätty
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Avattiin, ja {n} laajennustehoste lykättiin. Tehoste › Päivitä lykätyt tehosteet suorittaa sen.|Avattiin, ja {n} laajennustehostetta lykättiin. Tehoste › Päivitä lykätyt tehosteet suorittaa ne.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/fr.tsv b/crates/ui-egui/src/i18n/fr.tsv
+index e101df0..f141fbd 100644
+--- a/crates/ui-egui/src/i18n/fr.tsv
++++ b/crates/ui-egui/src/i18n/fr.tsv
+@@ -6848,3 +6848,4 @@ breakText	Glyphs	Glyphes
+ 	Deferred Effects	Effets différés
+ @msg	no plug-in effect is deferred	aucun effet de plug-in n’est différé
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Ouvert avec {n} effet de plug-in différé. Effet › Actualiser les effets différés l’exécute.|Ouvert avec {n} effets de plug-in différés. Effet › Actualiser les effets différés les exécute.
++	Jacnex AI…	IA de Jacnex…
+diff --git a/crates/ui-egui/src/i18n/hi.tsv b/crates/ui-egui/src/i18n/hi.tsv
+index 59256cb..2aded49 100644
+--- a/crates/ui-egui/src/i18n/hi.tsv
++++ b/crates/ui-egui/src/i18n/hi.tsv
+@@ -8290,3 +8290,4 @@ theme	Appearance	अपीयरेंस
+ 	Deferred Effects	स्थगित इफ़ेक्ट्स
+ @msg	no plug-in effect is deferred	कोई प्लग-इन इफ़ेक्ट स्थगित नहीं है
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	{n} प्लग-इन इफ़ेक्ट स्थगित रखकर खोला गया। इफ़ेक्ट › स्थगित इफ़ेक्ट्स रिफ्रेश करें इसे चलाता है।|{n} प्लग-इन इफ़ेक्ट्स स्थगित रखकर खोला गया। इफ़ेक्ट › स्थगित इफ़ेक्ट्स रिफ्रेश करें इन्हें चलाता है।
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/hu.tsv b/crates/ui-egui/src/i18n/hu.tsv
+index 7f57aa3..8eefc9d 100644
+--- a/crates/ui-egui/src/i18n/hu.tsv
++++ b/crates/ui-egui/src/i18n/hu.tsv
+@@ -6837,3 +6837,4 @@ breakText	Glyphs	Glifák
+ 	Deferred Effects	Elhalasztott effektusok
+ @msg	no plug-in effect is deferred	nincs elhalasztott bővítményeffektus
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Megnyitva, elhalasztott bővítményeffektusok: {n}. Az Effektus › Elhalasztott effektusok frissítése futtatja őket.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/id.tsv b/crates/ui-egui/src/i18n/id.tsv
+index 921c492..138becc 100644
+--- a/crates/ui-egui/src/i18n/id.tsv
++++ b/crates/ui-egui/src/i18n/id.tsv
+@@ -6581,3 +6581,4 @@ breakText	Glyphs	Glif
+ # Deferred plug-in effects
+ 	Refresh Deferred Effects	Segarkan efek yang ditunda
+ 	Deferred Effects	Efek yang ditunda
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/it.tsv b/crates/ui-egui/src/i18n/it.tsv
+index 29e731e..54b5cb3 100644
+--- a/crates/ui-egui/src/i18n/it.tsv
++++ b/crates/ui-egui/src/i18n/it.tsv
+@@ -6474,3 +6474,4 @@ breakText	Glyphs	Glifi
+ 	Deferred Effects	Effetti rimandati
+ @msg	no plug-in effect is deferred	nessun effetto plug-in è rimandato
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Aperto con {n} effetto plug-in rimandato. Effetto › Aggiorna effetti rimandati lo esegue.|Aperto con {n} effetti plug-in rimandati. Effetto › Aggiorna effetti rimandati li esegue.
++	Jacnex AI…	IA di Jacnex…
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index 1519c5c..66ddf60 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -6539,3 +6539,4 @@ breakText	Glyphs	字形
+ 	Deferred Effects	保留中の効果
+ @msg	no plug-in effect is deferred	保留中のプラグイン効果はありません
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	プラグイン効果を {n} 件保留して開きました。「効果 › 保留中の効果を更新」で実行します。
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/ka.tsv b/crates/ui-egui/src/i18n/ka.tsv
+index 2c76449..051e20e 100644
+--- a/crates/ui-egui/src/i18n/ka.tsv
++++ b/crates/ui-egui/src/i18n/ka.tsv
+@@ -6967,3 +6967,4 @@ font-script	Japanese	იაპონური
+ 	Deferred Effects	გადადებული ეფექტები
+ @msg	no plug-in effect is deferred	პლაგინის ეფექტი არ არის გადადებული
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	გაიხსნა, გადადებული პლაგინის ეფექტები: {n}. ეფექტი › გადადებული ეფექტების განახლება მათ გაუშვებს.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/ko.tsv b/crates/ui-egui/src/i18n/ko.tsv
+index 6dc2334..5b8dcb7 100644
+--- a/crates/ui-egui/src/i18n/ko.tsv
++++ b/crates/ui-egui/src/i18n/ko.tsv
+@@ -6435,3 +6435,4 @@ breakText	Glyphs	글리프
+ 	Deferred Effects	보류된 효과
+ @msg	no plug-in effect is deferred	보류된 플러그인 효과가 없습니다
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	플러그인 효과 {n}개를 보류하고 열었습니다. 효과 › 보류된 효과 새로 고침으로 실행합니다.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/nl.tsv b/crates/ui-egui/src/i18n/nl.tsv
+index adc160e..a7260fc 100644
+--- a/crates/ui-egui/src/i18n/nl.tsv
++++ b/crates/ui-egui/src/i18n/nl.tsv
+@@ -6632,3 +6632,4 @@ breakText	Glyphs	Glyphs
+ # Deferred plug-in effects
+ 	Refresh Deferred Effects	Uitgestelde effecten vernieuwen
+ 	Deferred Effects	Uitgestelde effecten
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/pl.tsv b/crates/ui-egui/src/i18n/pl.tsv
+index 7b9156f..3b5b7ee 100644
+--- a/crates/ui-egui/src/i18n/pl.tsv
++++ b/crates/ui-egui/src/i18n/pl.tsv
+@@ -6709,3 +6709,4 @@ breakText	Glyphs	Glify
+ 	Deferred Effects	Odroczone efekty
+ @msg	no plug-in effect is deferred	żaden efekt wtyczki nie jest odroczony
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Otwarto z {n} odroczonym efektem wtyczki. Efekt › Odśwież odroczone efekty go uruchamia.|Otwarto z {n} odroczonymi efektami wtyczek. Efekt › Odśwież odroczone efekty je uruchamia.|Otwarto z {n} odroczonymi efektami wtyczek. Efekt › Odśwież odroczone efekty je uruchamia.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/pt-br.tsv b/crates/ui-egui/src/i18n/pt-br.tsv
+index b2b8be4..b7603b5 100644
+--- a/crates/ui-egui/src/i18n/pt-br.tsv
++++ b/crates/ui-egui/src/i18n/pt-br.tsv
+@@ -6926,3 +6926,4 @@ swatch	Yellow Green	Verde-amarelado
+ 	Deferred Effects	Efeitos Adiados
+ @msg	no plug-in effect is deferred	nenhum efeito de plug-in está adiado
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Aberto com {n} efeito de plug-in adiado. Efeito › Atualizar Efeitos Adiados o executa.|Aberto com {n} efeitos de plug-in adiados. Efeito › Atualizar Efeitos Adiados os executa.
++	Jacnex AI…	IA da Jacnex…
+diff --git a/crates/ui-egui/src/i18n/ru.tsv b/crates/ui-egui/src/i18n/ru.tsv
+index f3ca624..f174cd2 100644
+--- a/crates/ui-egui/src/i18n/ru.tsv
++++ b/crates/ui-egui/src/i18n/ru.tsv
+@@ -6942,3 +6942,4 @@ shape	Open	Открытый
+ 	Deferred Effects	Отложенные эффекты
+ @msg	no plug-in effect is deferred	нет отложенных эффектов модулей
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Открыто с {n} отложенным эффектом модуля. Эффект › Обновить отложенные эффекты выполнит его.|Открыто с {n} отложенными эффектами модулей. Эффект › Обновить отложенные эффекты выполнит их.|Открыто с {n} отложенными эффектами модулей. Эффект › Обновить отложенные эффекты выполнит их.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/sv.tsv b/crates/ui-egui/src/i18n/sv.tsv
+index 34b3eec..d0784e2 100644
+--- a/crates/ui-egui/src/i18n/sv.tsv
++++ b/crates/ui-egui/src/i18n/sv.tsv
+@@ -8334,3 +8334,4 @@ digits	Hindi	Hindi
+ 	Deferred Effects	Uppskjutna effekter
+ @msg	no plug-in effect is deferred	ingen plugineffekt är uppskjuten
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Öppnades med {n} uppskjuten plugineffekt. Effekt › Uppdatera uppskjutna effekter kör den.|Öppnades med {n} uppskjutna plugineffekter. Effekt › Uppdatera uppskjutna effekter kör dem.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/tr.tsv b/crates/ui-egui/src/i18n/tr.tsv
+index 6dab7ea..0dcb39c 100644
+--- a/crates/ui-egui/src/i18n/tr.tsv
++++ b/crates/ui-egui/src/i18n/tr.tsv
+@@ -6809,3 +6809,4 @@ breakText	Glyphs	Glifler
+ 	Deferred Effects	Ertelenen Efektler
+ @msg	no plug-in effect is deferred	ertelenen eklenti efekti yok
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	{n} eklenti efekti ertelenerek açıldı. Efekt › Ertelenen Efektleri Yenile bunları çalıştırır.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/uk.tsv b/crates/ui-egui/src/i18n/uk.tsv
+index e15a737..bafe8a4 100644
+--- a/crates/ui-egui/src/i18n/uk.tsv
++++ b/crates/ui-egui/src/i18n/uk.tsv
+@@ -6454,3 +6454,4 @@ breakText	Glyphs	Гліфи
+ 	Deferred Effects	Відкладені ефекти
+ @msg	no plug-in effect is deferred	немає відкладених ефектів модулів
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Відкрито з {n} відкладеним ефектом модуля. Ефект › Оновити відкладені ефекти виконає його.|Відкрито з {n} відкладеними ефектами модулів. Ефект › Оновити відкладені ефекти виконає їх.|Відкрито з {n} відкладеними ефектами модулів. Ефект › Оновити відкладені ефекти виконає їх.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
+index eb9eb6a..db40542 100644
+--- a/crates/ui-egui/src/i18n/vi.tsv
++++ b/crates/ui-egui/src/i18n/vi.tsv
+@@ -6455,3 +6455,4 @@ breakText	Glyphs	Glyph
+ 	Deferred Effects	Hiệu ứng bị hoãn
+ @msg	no plug-in effect is deferred	không có hiệu ứng plug-in nào bị hoãn
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	Đã mở với {n} hiệu ứng plug-in bị hoãn. Hiệu ứng › Làm mới hiệu ứng bị hoãn sẽ chạy chúng.
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/zh-hans.tsv b/crates/ui-egui/src/i18n/zh-hans.tsv
+index 4493024..308e345 100644
+--- a/crates/ui-egui/src/i18n/zh-hans.tsv
++++ b/crates/ui-egui/src/i18n/zh-hans.tsv
+@@ -6691,3 +6691,4 @@ breakText	Glyphs	字形
+ 	Deferred Effects	延迟的效果
+ @msg	no plug-in effect is deferred	没有延迟的增效工具效果
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	打开时延迟了 {n} 个增效工具效果。效果 › 刷新延迟的效果可运行它们。
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/i18n/zh-hant.tsv b/crates/ui-egui/src/i18n/zh-hant.tsv
+index 3feffe1..648999f 100644
+--- a/crates/ui-egui/src/i18n/zh-hant.tsv
++++ b/crates/ui-egui/src/i18n/zh-hant.tsv
+@@ -6489,3 +6489,4 @@ breakText	Glyphs	字符
+ 	Deferred Effects	延後的效果
+ @msg	no plug-in effect is deferred	沒有延後的增效模組效果
+ @msgplural	Opened with {n} plug-in effect deferred. Effect › Refresh Deferred Effects runs it.|Opened with {n} plug-in effects deferred. Effect › Refresh Deferred Effects runs them.	開啟時延後了 {n} 個增效模組效果。效果 › 重新整理延後的效果可執行它們。
++	Jacnex AI…	Jacnex AI…
+diff --git a/crates/ui-egui/src/jacnex_ia.rs b/crates/ui-egui/src/jacnex_ia.rs
+new file mode 100644
+index 0000000..fee9181
+--- /dev/null
++++ b/crates/ui-egui/src/jacnex_ia.rs
+@@ -0,0 +1,1414 @@
++//! Jacnex: la IA integrada de Vectornex (Objeto › IA de Jacnex…).
++//!
++//! Se describe un logo, un ícono, una ilustración o una mascota; un modelo de imagen lo dibuja
++//! **plano** (colores sólidos, sin degradados ni sombras, sobre fondo blanco) y Vectornex lo
++//! convierte en **trazados editables agrupados por color** con su propio Calco de imagen, en este
++//! equipo: primero en modo «Flat Logo» (bordes precisos, colores exactos) y, si la imagen no es
++//! plana, en «Auto Color». El fondo blanco se ignora. También vectoriza gratis, sin IA, la imagen
++//! que esté seleccionada.
++//!
++//! La red y el trazado van en hilos aparte: la interfaz nunca se congela. El servidor es
++//! app.jacnex.store (`/v1/jacnex/*`), con la llave de la sesión iniciada en Jacnex Studio. Los
++//! créditos se descuentan en el servidor, que los devuelve si una generación falla.
++
++use std::sync::mpsc::{Receiver, Sender, TryRecvError};
++use std::time::{Duration, Instant};
++
++use egui::{Color32, RichText};
++use serde_json::{Value, json};
++use vectorcraft_engine::cmd::{TraceRun, Traced};
++
++use crate::VectorcraftApp;
++
++/// El modelo por defecto: el más usado.
++pub const MODELO: &str = "nano-banana-2";
++/// Los modelos de imagen, de más a menos usados: así se listan (los que no están aquí, al final).
++const POPULARIDAD: &[&str] = &["nano-banana-2", "nano-banana-pro", "gpt-image-2", "nano-banana", "seedream-5-flash", "flux-2-pro"];
++/// Los modelos de imagen conocidos, para mostrarlos antes de que responda el servidor (que manda
++/// sus precios): (id, nombre, proporciones, descripción).
++const MODELOS_BASE: &[(&str, &str, &str, &str)] = &[
++    ("nano-banana-2", "Google Nano Banana 2", GEMINI, "Rápido y muy bueno para el día a día."),
++    ("nano-banana-pro", "Google Nano Banana Pro", GEMINI, "La mejor calidad de Google: formas limpias y detalle nítido."),
++    ("gpt-image-2", "OpenAI GPT Image 2", "1:1 4:3 3:4 3:2 2:3 16:9 9:16", "Sigue tus indicaciones al pie de la letra, incluido el texto del logo."),
++    ("nano-banana", "Google Nano Banana", GEMINI, "El más económico de Google. Bueno para probar ideas."),
++    ("seedream-5-flash", "ByteDance Seedream 5.0 Flash", "1:1 4:3 3:4 3:2 2:3 16:9 9:16 21:9", "Imágenes 2K a muy buen precio."),
++    ("flux-2-pro", "Black Forest Labs FLUX.2 Pro", "1:1 4:3 3:4 3:2 2:3 16:9 9:16", "Estilos artísticos con mucho control."),
++];
++const GEMINI: &str = "1:1 4:5 3:4 2:3 9:16 4:3 3:2 16:9 21:9";
++/// El lado más largo que se acepta de una imagen recibida.
++const MAX_LADO: u32 = 8192;
++const MB: u64 = 1024 * 1024;
++/// Lo más que puede pesar una imagen recibida.
++const MAX_BYTES: u64 = 40 * MB;
++/// El comando que traza y convierte en trazados.
++const TRAZAR: &str = "imageTrace.makeAndExpand";
++/// Lo que dice el Calco de imagen cuando una imagen no es plana para «Flat Logo».
++const NO_PLANA: &str = "flat-colour logo";
++
++/// Qué se crea: cambia las instrucciones al modelo.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum Estilo {
++    #[default]
++    Logo,
++    Icono,
++    Ilustracion,
++    Mascota,
++}
++
++impl Estilo {
++    pub const TODOS: [Estilo; 4] = [Estilo::Logo, Estilo::Icono, Estilo::Ilustracion, Estilo::Mascota];
++
++    pub fn nombre(self) -> &'static str {
++        match self {
++            Estilo::Logo => "Logo",
++            Estilo::Icono => "Ícono",
++            Estilo::Ilustracion => "Ilustración",
++            Estilo::Mascota => "Mascota",
++        }
++    }
++
++    fn explicacion(self) -> &'static str {
++        match self {
++            Estilo::Logo => "Un logo simple de pocos colores, listo para tu marca.",
++            Estilo::Icono => "Un ícono de líneas y formas limpias, para web o apps.",
++            Estilo::Ilustracion => "Una escena o un objeto en estilo plano, con más colores.",
++            Estilo::Mascota => "Un personaje amigable para tu marca, en estilo plano.",
++        }
++    }
++
++    fn pista(self) -> &'static str {
++        match self {
++            Estilo::Logo => "Ej.: un colibrí verde para una tienda de jugos",
++            Estilo::Icono => "Ej.: un carrito de compras",
++            Estilo::Ilustracion => "Ej.: una taza de café con granos alrededor",
++            Estilo::Mascota => "Ej.: una llama sonriente con chullo",
++        }
++    }
++
++    fn ideas(self) -> &'static [&'static str] {
++        match self {
++            Estilo::Logo => &["una hoja con una gota de agua", "un león geométrico", "una montaña con el sol"],
++            Estilo::Icono => &["una casa", "un sobre de correo", "una campana"],
++            Estilo::Ilustracion => &["una planta en maceta", "una ciudad al atardecer", "frutas tropicales"],
++            Estilo::Mascota => &["un gato astronauta", "un robot amable", "un perro chef"],
++        }
++    }
++
++    /// Las instrucciones al modelo: lo pedido, en estilo plano sobre blanco, para que el Calco de
++    /// imagen lo convierta en trazados limpios.
++    fn instrucciones(self, pedido: &str) -> String {
++        let pedido = pedido.trim();
++        let plano = "Flat 2D vector style: solid flat colors only, no gradients, no shadows, no glow, no texture, no noise, \
++                     no 3D, crisp clean edges, well separated shapes. Centered on a plain pure white background (#FFFFFF), \
++                     with generous empty margins. No mockup, no frame, no watermark.";
++        match self {
++            Estilo::Logo => format!(
++                "A minimalist flat vector logo: {pedido}. Simple bold geometric shapes, a limited palette of 2 to 4 colors. \
++                 No text unless the description asks for it. {plano}"
++            ),
++            Estilo::Icono => format!("A flat vector icon: {pedido}. Simple, bold, readable at small sizes, 1 to 3 colors. No text. {plano}"),
++            Estilo::Ilustracion => format!("A flat vector illustration: {pedido}. Clean simple shapes, a limited palette of up to 8 colors. {plano}"),
++            Estilo::Mascota => format!(
++                "A friendly flat vector mascot character: {pedido}. Cute, simple shapes, thick clean outlines, up to 6 colors. No text. {plano}"
++            ),
++        }
++    }
++}
++
++/// La proporción de la imagen.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum Proporcion {
++    #[default]
++    Cuadrada,
++    Horizontal,
++    Vertical,
++    Ancha,
++}
++
++impl Proporcion {
++    pub const TODAS: [Proporcion; 4] = [Proporcion::Cuadrada, Proporcion::Horizontal, Proporcion::Vertical, Proporcion::Ancha];
++
++    fn aspecto(self) -> (u32, u32) {
++        match self {
++            Proporcion::Cuadrada => (1, 1),
++            Proporcion::Horizontal => (4, 3),
++            Proporcion::Vertical => (3, 4),
++            Proporcion::Ancha => (16, 9),
++        }
++    }
++
++    /// El tamaño en píxeles que se pide (lado largo de unos 1 024).
++    fn tamano(self) -> (u32, u32) {
++        match self {
++            Proporcion::Cuadrada => (1024, 1024),
++            Proporcion::Horizontal => (1152, 864),
++            Proporcion::Vertical => (864, 1152),
++            Proporcion::Ancha => (1344, 756),
++        }
++    }
++
++    fn nombre(self) -> String {
++        let (a, b) = self.aspecto();
++        format!("{a}:{b}")
++    }
++}
++
++/// Un modelo o herramienta del servidor, con sus créditos por opción.
++#[derive(Clone, Debug)]
++struct ModeloInfo {
++    id: String,
++    nombre: String,
++    descripcion: String,
++    herramienta: bool,
++    aspectos: Vec<(u32, u32)>,
++    /// Créditos por opción: `1k`/`2k`/`4k` o `unica`.
++    creditos: Vec<(String, i64)>,
++}
++
++impl ModeloInfo {
++    fn costo(&self, clave: &str) -> Option<i64> {
++        let por = |k: &str| self.creditos.iter().find(|(c, _)| c == k).map(|(_, v)| *v);
++        por(clave).or_else(|| por("unica")).or_else(|| (clave == "1k").then(|| self.creditos.first().map(|c| c.1)).flatten())
++    }
++
++    fn tiene_resoluciones(&self) -> bool {
++        self.creditos.iter().any(|(c, _)| c == "1k")
++    }
++}
++
++/// `"16:9"` → (16, 9).
++fn aspecto(s: &str) -> Option<(u32, u32)> {
++    let (a, b) = s.split_once(':')?;
++    let (a, b) = (a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?);
++    (a > 0 && b > 0).then_some((a, b))
++}
++
++fn modelos_base() -> Vec<ModeloInfo> {
++    MODELOS_BASE
++        .iter()
++        .map(|(id, nombre, aspectos, desc)| ModeloInfo {
++            id: (*id).into(),
++            nombre: (*nombre).into(),
++            descripcion: (*desc).into(),
++            herramienta: false,
++            aspectos: aspectos.split_whitespace().filter_map(aspecto).collect(),
++            creditos: Vec::new(),
++        })
++        .collect()
++}
++
++/// La cuenta y el catálogo, según el servidor.
++#[derive(Clone, Debug)]
++struct Info {
++    nombre: String,
++    creditos: i64,
++    modelos: Vec<ModeloInfo>,
++}
++
++/// Lo que el hilo de red le cuenta a la interfaz.
++enum Evento {
++    Etapa(&'static str),
++    Cobrado { saldo: Option<i64> },
++    /// La imagen recibida, en PNG, y su tamaño.
++    Listo(Vec<u8>, u32, u32),
++    Error(String),
++}
++
++/// Una generación en curso.
++struct Trabajo {
++    rx: Receiver<Evento>,
++    etapa: &'static str,
++    inicio: Instant,
++    /// El documento al que va ([`vectorcraft_engine::DocState::uid`]); ninguno: uno nuevo.
++    doc: Option<u64>,
++}
++
++/// Lo que devuelve el hilo del trazado: la corrida, lo trazado y si la imagen era plana.
++type Trazado = Result<(TraceRun, Traced, bool), String>;
++
++/// Un trazado en curso.
++struct Trazo {
++    rx: Receiver<Trazado>,
++    doc: u64,
++    inicio: Instant,
++    /// Viene de una generación (no de «Vectorizar la imagen seleccionada»).
++    de_ia: bool,
++}
++
++/// El estado de la IA en la app.
++#[derive(Default)]
++pub struct Estado {
++    /// La ventana «IA de Jacnex» está abierta.
++    pub abierta: bool,
++    /// Lo que se quiere crear (prompt).
++    pub prompt: String,
++    pub estilo: Estilo,
++    /// El id del modelo de imagen elegido (vacío = [`MODELO`]).
++    pub modelo: String,
++    pub proporcion: Proporcion,
++    info: Option<Info>,
++    info_error: Option<String>,
++    info_rx: Option<Receiver<Result<Info, String>>>,
++    trabajo: Option<Trabajo>,
++    trazo: Option<Trazo>,
++    /// El último aviso: (salió bien, texto).
++    aviso: Option<(bool, String)>,
++    /// Hay una sesión de Jacnex Studio (se vuelve a mirar al abrir la ventana o actualizar).
++    con_sesion: bool,
++    /// Un servidor de pruebas en esta máquina, en lugar de la cuenta de Jacnex Studio
++    /// ([`usar_servidor_local`]).
++    local: Option<(String, String)>,
++}
++
++impl Estado {
++    /// Los modelos de imagen, de más a menos usados: los del servidor, o los conocidos mientras
++    /// no responde.
++    fn modelos(&self) -> Vec<ModeloInfo> {
++        let mut lista: Vec<ModeloInfo> = match &self.info {
++            Some(i) if i.modelos.iter().any(|m| !m.herramienta) => i.modelos.iter().filter(|m| !m.herramienta).cloned().collect(),
++            _ => modelos_base(),
++        };
++        lista.sort_by_key(|m| POPULARIDAD.iter().position(|p| *p == m.id).unwrap_or(POPULARIDAD.len()));
++        lista
++    }
++
++    fn modelo_actual(&self) -> ModeloInfo {
++        let lista = self.modelos();
++        let id = if self.modelo.is_empty() { MODELO } else { self.modelo.as_str() };
++        lista.iter().find(|m| m.id == id).or_else(|| lista.iter().find(|m| m.id == MODELO)).or(lista.first()).cloned().unwrap_or_else(|| ModeloInfo {
++            id: MODELO.into(),
++            nombre: "Google Nano Banana 2".into(),
++            descripcion: String::new(),
++            herramienta: false,
++            aspectos: Vec::new(),
++            creditos: Vec::new(),
++        })
++    }
++
++    /// Los créditos de una generación con el modelo y la proporción elegidos, según el servidor.
++    fn costo(&self) -> Option<i64> {
++        self.info.as_ref()?;
++        self.modelo_actual().costo("1k")
++    }
++
++    fn ocupado(&self) -> bool {
++        self.trabajo.is_some() || self.trazo.is_some()
++    }
++}
++
++/// Usa un Forgenex de pruebas en esta máquina (`http://127.0.0.1:…` o `http://localhost:…`) con
++/// la llave `llave`, en lugar de la sesión de Jacnex Studio. Otras direcciones se rechazan.
++pub fn usar_servidor_local(app: &mut VectorcraftApp, servidor: &str, llave: &str) -> bool {
++    let ok = es_local(servidor) && llave.starts_with("jk_");
++    if ok {
++        app.jacnex_ia.local = Some((servidor.trim_end_matches('/').to_string(), llave.to_string()));
++    }
++    ok
++}
++
++// --- Cuenta y servidor -----------------------------------------------------------------------
++
++struct Conexion {
++    servidor: String,
++    llave: String,
++}
++
++/// El servidor: app.jacnex.store. `JACNEX_IA_SERVIDOR` solo puede apuntar a esta misma máquina
++/// (pruebas con un Forgenex local); cualquier otro valor se ignora.
++fn servidor() -> String {
++    match std::env::var("JACNEX_IA_SERVIDOR") {
++        Ok(s) if es_local(&s) => s.trim_end_matches('/').to_string(),
++        _ => "https://app.jacnex.store".to_string(),
++    }
++}
++
++fn es_local(url: &str) -> bool {
++    url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")
++}
++
++/// La llave de la sesión de Jacnex Studio (`%LOCALAPPDATA%\Jacnex Studio\cuenta.json`). Con un
++/// servidor local de pruebas vale `JACNEX_IA_LLAVE`.
++fn conexion(e: &Estado) -> Option<Conexion> {
++    if let Some((servidor, llave)) = &e.local {
++        return Some(Conexion { servidor: servidor.clone(), llave: llave.clone() });
++    }
++    let servidor = servidor();
++    if es_local(&servidor)
++        && let Ok(llave) = std::env::var("JACNEX_IA_LLAVE")
++    {
++        return llave.starts_with("jk_").then_some(Conexion { servidor, llave });
++    }
++    let base = std::env::var_os("LOCALAPPDATA")
++        .map(std::path::PathBuf::from)
++        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local").join("share")))?;
++    let texto = std::fs::read_to_string(base.join("Jacnex Studio").join("cuenta.json")).ok()?;
++    let v: Value = serde_json::from_str(&texto).ok()?;
++    let llave = v.get("llave")?.as_str()?.to_string();
++    llave.starts_with("jk_").then_some(Conexion { servidor, llave })
++}
++
++/// El catálogo de `/v1/jacnex/estado`.
++fn leer_info(v: &Value) -> Info {
++    let modelos = v
++        .get("modelos")
++        .and_then(|m| m.as_array())
++        .map(|lista| {
++            lista
++                .iter()
++                .filter_map(|m| {
++                    let s = |k: &str| m.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
++                    let id = s("id");
++                    if id.is_empty() {
++                        return None;
++                    }
++                    let proveedor = s("proveedor");
++                    let nombre = s("nombre");
++                    let herramienta = s("tipo") == "herramienta";
++                    let nombre = if herramienta || proveedor.is_empty() { nombre } else { format!("{proveedor} {nombre}") };
++                    let creditos = m
++                        .get("creditos")
++                        .and_then(|c| c.as_object())
++                        .map(|c| c.iter().filter_map(|(k, v)| Some((k.clone(), v.as_i64()?))).collect())
++                        .unwrap_or_default();
++                    let aspectos = m
++                        .get("aspectos")
++                        .and_then(|a| a.as_array())
++                        .map(|a| a.iter().filter_map(|x| x.as_str().and_then(aspecto)).collect())
++                        .unwrap_or_default();
++                    Some(ModeloInfo { id, nombre, descripcion: s("descripcion"), herramienta, aspectos, creditos })
++                })
++                .collect()
++        })
++        .unwrap_or_default();
++    Info {
++        nombre: v.get("nombre").and_then(|x| x.as_str()).unwrap_or("").to_string(),
++        creditos: v.get("creditos").and_then(|x| x.as_i64()).unwrap_or(0),
++        modelos,
++    }
++}
++
++/// Un pedido a `/v1/jacnex/generar` (de texto a imagen: sin imágenes).
++struct Envio {
++    modelo: String,
++    prompt: String,
++    tamano: (u32, u32),
++    aspecto: Option<(u32, u32)>,
++    resolucion: Option<&'static str>,
++}
++
++/// La imagen recibida (PNG, JPEG, WebP…) como PNG, con su tamaño.
++fn a_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
++    let img = image::load_from_memory(bytes).map_err(|e| format!("La imagen recibida no se pudo leer: {e}"))?;
++    let (w, h) = (img.width(), img.height());
++    if w == 0 || h == 0 || w > MAX_LADO || h > MAX_LADO {
++        return Err("La imagen recibida tiene un tamaño no válido.".into());
++    }
++    let mut png = Vec::new();
++    img.to_rgba8().write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| format!("No se pudo preparar la imagen: {e}"))?;
++    Ok((png, w, h))
++}
++
++#[cfg(not(target_arch = "wasm32"))]
++mod red {
++    use super::{Conexion, Envio, Evento, Info, es_local};
++    use std::sync::mpsc::Sender;
++    use std::time::{Duration, Instant};
++
++    const LIMITE_JSON: u64 = 1024 * 1024;
++
++    fn agente(segundos: u64, https: bool) -> ureq::Agent {
++        ureq::Agent::config_builder()
++            .tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build())
++            .https_only(https)
++            .timeout_global(Some(Duration::from_secs(segundos)))
++            .http_status_as_error(false)
++            .user_agent("Vectornex")
++            .build()
++            .new_agent()
++    }
++
++    fn agente_para(c: &Conexion, segundos: u64) -> ureq::Agent {
++        agente(segundos, !es_local(&c.servidor))
++    }
++
++    /// El cuerpo JSON de una respuesta; los errores del servidor (`{error:{message}}`) como texto.
++    fn json(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<serde_json::Value, String> {
++        let mut r = r.map_err(|e| format!("No se pudo conectar con Jacnex: {e}"))?;
++        let estado = r.status().as_u16();
++        let texto = r.body_mut().with_config().limit(LIMITE_JSON).read_to_string().map_err(|e| format!("Respuesta incompleta: {e}"))?;
++        let v: serde_json::Value = serde_json::from_str(&texto).unwrap_or(serde_json::Value::Null);
++        if (200..300).contains(&estado) {
++            return Ok(v);
++        }
++        let msg = v.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string);
++        Err(match (estado, msg) {
++            (401, _) => "Tu sesión de Jacnex venció. Vuelve a iniciar sesión en Jacnex Studio.".into(),
++            (_, Some(m)) => m,
++            (404, None) => "El servidor de Jacnex aún no tiene esta función. Inténtalo más tarde.".into(),
++            _ => format!("El servidor respondió {estado}."),
++        })
++    }
++
++    pub fn info(c: &Conexion) -> Result<Info, String> {
++        let url = format!("{}/v1/jacnex/estado", c.servidor);
++        let v = json(agente_para(c, 20).get(&url).header("Authorization", &format!("Bearer {}", c.llave)).call())?;
++        Ok(super::leer_info(&v))
++    }
++
++    /// Un cuerpo multipart/form-data de campos de texto.
++    fn multipart(campos: &[(&str, String)]) -> (String, Vec<u8>) {
++        let semilla = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
++        let limite = format!("----vectornex{semilla:x}");
++        let mut b = Vec::new();
++        for (k, v) in campos {
++            b.extend_from_slice(format!("--{limite}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
++        }
++        b.extend_from_slice(format!("--{limite}--\r\n").as_bytes());
++        (format!("multipart/form-data; boundary={limite}"), b)
++    }
++
++    /// Crea el trabajo de `e`, espera su resultado y lo descarga (hasta `limite` bytes).
++    pub fn generar(c: &Conexion, e: Envio, limite: u64, tx: &Sender<Evento>) -> Result<Vec<u8>, String> {
++        let auth = format!("Bearer {}", c.llave);
++        let _ = tx.send(Evento::Etapa("Enviando tu idea…"));
++        let (w, h) = e.tamano;
++        let mut campos = vec![("model", e.modelo), ("prompt", e.prompt), ("n", "1".to_string()), ("size", format!("{w}x{h}"))];
++        if let Some((a, b)) = e.aspecto {
++            campos.push(("aspect", format!("{a}:{b}")));
++        }
++        if let Some(r) = e.resolucion {
++            campos.push(("resolution", r.to_string()));
++        }
++        let (tipo, cuerpo) = multipart(&campos);
++        let url = format!("{}/v1/jacnex/generar", c.servidor);
++        let v = json(agente_para(c, 180).post(&url).header("Authorization", &auth).header("Content-Type", &tipo).send(&cuerpo[..]))?;
++        let id = v
++            .get("id")
++            .and_then(|x| x.as_str())
++            .or_else(|| v.pointer("/ids/0").and_then(|x| x.as_str()))
++            .map(str::to_string)
++            .ok_or_else(|| "El servidor no devolvió el trabajo.".to_string())?;
++        let _ = tx.send(Evento::Cobrado { saldo: v.get("saldo").and_then(|x| x.as_i64()) });
++        let _ = tx.send(Evento::Etapa("La IA está dibujando…"));
++        let inicio = Instant::now();
++        let resultado = loop {
++            std::thread::sleep(Duration::from_millis(1500));
++            if inicio.elapsed() > Duration::from_secs(420) {
++                return Err("La IA tardó demasiado. Si no llega, tus créditos se devuelven solos.".into());
++            }
++            let consulta = format!("{}/v1/jacnex/trabajo/{id}", c.servidor);
++            let v = match json(agente_para(c, 30).get(&consulta).header("Authorization", &auth).call()) {
++                Ok(v) => v,
++                // Un corte de red momentáneo no pierde el trabajo: se vuelve a consultar.
++                Err(m) if m.starts_with("No se pudo conectar") => continue,
++                Err(m) => return Err(m),
++            };
++            match v.get("estado").and_then(|x| x.as_str()) {
++                Some("listo") => match v.pointer("/resultados/0").and_then(|x| x.as_str()) {
++                    Some(u) => break u.to_string(),
++                    None => return Err("La IA no devolvió ninguna imagen. Tus créditos fueron devueltos.".into()),
++                },
++                Some("fallido") => {
++                    let m = v.get("error").and_then(|x| x.as_str()).unwrap_or("La IA no pudo completar la imagen.");
++                    return Err(format!("{m} Tus créditos fueron devueltos."));
++                }
++                _ => {}
++            }
++        };
++        let _ = tx.send(Evento::Etapa("Descargando la imagen…"));
++        descargar(c, &resultado, &auth, limite)
++    }
++
++    fn descargar(c: &Conexion, url: &str, auth: &str, limite: u64) -> Result<Vec<u8>, String> {
++        let local = es_local(url) && es_local(&c.servidor);
++        if !local && !url.starts_with("https://") {
++            return Err("La dirección del resultado no es segura.".into());
++        }
++        // La llave solo viaja a Jacnex: los resultados alojados en otro sitio se piden sin ella.
++        let mut pedido = agente(300, !local).get(url);
++        if url.starts_with(&format!("{}/", c.servidor)) {
++            pedido = pedido.header("Authorization", auth);
++        }
++        let mut r = pedido.call().map_err(|e| format!("No se pudo descargar el resultado: {e}"))?;
++        if !r.status().is_success() {
++            return Err(format!("No se pudo descargar el resultado ({}).", r.status().as_u16()));
++        }
++        r.body_mut().with_config().limit(limite).read_to_vec().map_err(|e| format!("Descarga incompleta: {e}"))
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++mod red {
++    use super::{Conexion, Envio, Evento, Info};
++    use std::sync::mpsc::Sender;
++    const SOLO_ESCRITORIO: &str = "La IA está disponible en la app de escritorio.";
++    pub fn info(_: &Conexion) -> Result<Info, String> {
++        Err(SOLO_ESCRITORIO.into())
++    }
++    pub fn generar(_: &Conexion, _: Envio, _: u64, _: &Sender<Evento>) -> Result<Vec<u8>, String> {
++        Err(SOLO_ESCRITORIO.into())
++    }
++}
++
++/// Corre `f` en un hilo y devuelve por dónde llega su respuesta.
++fn en_hilo<T: Send + 'static>(f: impl FnOnce(Sender<T>) + Send + 'static) -> Receiver<T> {
++    let (tx, rx) = std::sync::mpsc::channel();
++    #[cfg(not(target_arch = "wasm32"))]
++    {
++        let _ = std::thread::Builder::new().name("jacnex-ia".into()).spawn(move || f(tx));
++    }
++    #[cfg(target_arch = "wasm32")]
++    f(tx);
++    rx
++}
++
++fn pedir_info(e: &mut Estado) {
++    if e.info_rx.is_some() {
++        return;
++    }
++    let c = conexion(e);
++    e.con_sesion = c.is_some();
++    let Some(c) = c else {
++        e.info = None;
++        e.info_error = None;
++        return;
++    };
++    e.info_rx = Some(en_hilo(move |tx| {
++        let _ = tx.send(red::info(&c));
++    }));
++}
++
++// --- Generar, colocar y vectorizar ------------------------------------------------------------
++
++/// Por qué no se puede generar ahora (o nada).
++fn falta(e: &Estado) -> Option<&'static str> {
++    if e.ocupado() {
++        Some("Espera a que termine lo que está en curso.")
++    } else if !e.con_sesion && e.local.is_none() {
++        Some("Inicia sesión en Jacnex Studio para usar la IA.")
++    } else if e.prompt.trim().is_empty() {
++        Some("Describe lo que quieres crear.")
++    } else if let (Some(i), Some(c)) = (&e.info, e.costo())
++        && i.creditos < c
++    {
++        Some("No tienes créditos suficientes: recarga en jacnex.store.")
++    } else {
++        None
++    }
++}
++
++/// Está generando o vectorizando.
++pub fn ocupado(app: &VectorcraftApp) -> bool {
++    app.jacnex_ia.ocupado()
++}
++
++/// El último aviso: (salió bien, texto).
++pub fn aviso(app: &VectorcraftApp) -> Option<(bool, String)> {
++    app.jacnex_ia.aviso.clone()
++}
++
++/// Pide la imagen al servidor (en un hilo); al llegar se coloca y se vectoriza ([`actualizar`]).
++pub fn generar(app: &mut VectorcraftApp) {
++    let e = &mut app.jacnex_ia;
++    if e.local.is_none() && !e.con_sesion {
++        e.con_sesion = conexion(e).is_some();
++    }
++    if let Some(f) = falta(e) {
++        e.aviso = Some((false, f.into()));
++        return;
++    }
++    let Some(c) = conexion(e) else {
++        e.aviso = Some((false, "Inicia sesión en Jacnex Studio para usar la IA.".into()));
++        return;
++    };
++    let m = e.modelo_actual();
++    let p = e.proporcion;
++    let a = p.aspecto();
++    let envio = Envio {
++        modelo: m.id.clone(),
++        prompt: e.estilo.instrucciones(&e.prompt),
++        tamano: p.tamano(),
++        aspecto: (m.aspectos.is_empty() || m.aspectos.contains(&a)).then_some(a),
++        resolucion: m.tiene_resoluciones().then_some("1k"),
++    };
++    let doc = app.session.active().map(|d| d.uid);
++    let e = &mut app.jacnex_ia;
++    e.aviso = None;
++    let rx = en_hilo(move |tx| {
++        let r = red::generar(&c, envio, MAX_BYTES, &tx).and_then(|bytes| a_png(&bytes));
++        let _ = tx.send(match r {
++            Ok((png, w, h)) => Evento::Listo(png, w, h),
++            Err(m) => Evento::Error(m),
++        });
++    });
++    e.trabajo = Some(Trabajo { rx, etapa: "Preparando…", inicio: Instant::now(), doc });
++}
++
++/// Coloca la imagen `png` (`w`×`h` px) en el documento de la generación (o en uno nuevo), a un
++/// 80 % de su mesa de trabajo activa → el id del objeto colocado.
++fn colocar(app: &mut VectorcraftApp, doc: Option<u64>, png: &[u8], w: u32, h: u32) -> Result<u64, String> {
++    let destino = doc.and_then(|uid| app.session.documents().iter().position(|d| d.uid == uid));
++    match destino {
++        Some(i) => {
++            app.session.set_active(i);
++        }
++        None => {
++            // Un documento nuevo del tamaño de la imagen (lado largo de 800 pt).
++            let k = 800.0 / f64::from(w.max(h).max(1));
++            let (dw, dh) = ((f64::from(w) * k).round(), (f64::from(h) * k).round());
++            app.run("file.new", json!({"name": "IA de Jacnex", "width": dw, "height": dh}))?;
++        }
++    }
++    let d = app.session.active().ok_or("No hay un documento donde colocar la imagen.")?;
++    let mesa = d.active_artboard.and_then(|id| d.doc.artboards.iter().find(|a| a.id == id)).or(d.doc.artboards.first()).map(|a| a.rect);
++    let (x, y, mw, mh) = match mesa {
++        Some(r) => (r.x0, r.y0, r.width(), r.height()),
++        None => (0.0, 0.0, f64::from(w), f64::from(h)),
++    };
++    let f = if destino.is_some() { 0.8 } else { 1.0 };
++    let (cw, ch) = (mw * f, mh * f);
++    let rect = [x + (mw - cw) / 2.0, y + (mh - ch) / 2.0, cw, ch];
++    let v = app.run("file.place", json!({"name": "ia-jacnex.png", "dataBase64": vectorcraft_format::base64_encode(png), "rect": rect}))?;
++    v.pointer("/ids/0").and_then(Value::as_u64).ok_or_else(|| "La imagen no se pudo colocar.".to_string())
++}
++
++/// Los parámetros del trazado de `id` (o de lo seleccionado) con `preset`: por colores, sin el
++/// fondo blanco.
++fn parametros(id: Option<u64>, preset: &str) -> Value {
++    let mut p = json!({"preset": preset, "byColor": true, "params": {"ignoreWhite": true}});
++    if let (Some(id), Some(o)) = (id, p.as_object_mut()) {
++        o.insert("id".into(), json!(id));
++    }
++    p
++}
++
++fn es_no_plana(e: &str) -> bool {
++    e.contains(NO_PLANA)
++}
++
++fn listo(plana: bool, de_ia: bool) -> String {
++    let base = if de_ia { "Listo: tu diseño ya es vector editable, agrupado por color." } else { "Listo: la imagen ya es vector editable, agrupado por color." };
++    if plana { format!("{base} Ctrl+Z lo deshace.") } else { format!("{base} Tenía degradados: se trazó con más colores.") }
++}
++
++/// Vectoriza el objeto `id` (o la imagen seleccionada): «Flat Logo» y, si no es plana,
++/// «Auto Color». En un hilo aparte donde se puede; si no, al momento.
++fn vectorizar(app: &mut VectorcraftApp, id: Option<u64>, de_ia: bool) -> Result<(), String> {
++    let (plano, color) = (parametros(id, "Flat Logo"), parametros(id, "Auto Color"));
++    if !crate::trace_runs::available(app) {
++        let (r, plana) = match app.run(TRAZAR, plano) {
++            Err(e) if es_no_plana(&e) => (app.run(TRAZAR, color), false),
++            r => (r, true),
++        };
++        r?;
++        app.jacnex_ia.aviso = Some((true, listo(plana, de_ia)));
++        return Ok(());
++    }
++    let a = TraceRun::prepare(&app.session, TRAZAR, &plano).map_err(|e| e.to_string())?;
++    let b = TraceRun::prepare(&app.session, TRAZAR, &color).map_err(|e| e.to_string())?;
++    let doc = app.session.doc().map_err(|e| e.to_string())?.uid;
++    let rx = en_hilo(move |tx| {
++        let seguir = |_: u64, _: u64| true;
++        let r = match vectorcraft_engine::guard::catch_panic(|| a.run(&seguir)) {
++            Ok(Ok(t)) => Ok((a, t, true)),
++            Ok(Err(e)) if es_no_plana(&e.to_string()) => match vectorcraft_engine::guard::catch_panic(|| b.run(&seguir)) {
++                Ok(Ok(t)) => Ok((b, t, false)),
++                Ok(Err(e)) => Err(e.to_string()),
++                Err(m) => Err(format!("error interno: {m}")),
++            },
++            Ok(Err(e)) => Err(e.to_string()),
++            Err(m) => Err(format!("error interno: {m}")),
++        };
++        let _ = tx.send(r);
++    });
++    app.jacnex_ia.trazo = Some(Trazo { rx, doc, inicio: Instant::now(), de_ia });
++    Ok(())
++}
++
++/// «Vectorizar la imagen seleccionada»: sin IA ni créditos.
++pub fn vectorizar_seleccion(app: &mut VectorcraftApp) {
++    if app.jacnex_ia.ocupado() {
++        return;
++    }
++    app.jacnex_ia.aviso = None;
++    if let Err(e) = vectorizar(app, None, false) {
++        app.jacnex_ia.aviso = Some((false, mensaje_trazo(&e)));
++    }
++}
++
++fn mensaje_trazo(e: &str) -> String {
++    if e.contains("select an image") || e.contains("nothing selected") {
++        "Primero selecciona una imagen colocada (Archivo › Colocar…).".into()
++    } else {
++        format!("No se pudo vectorizar: {e}")
++    }
++}
++
++/// Hay una imagen seleccionada que se puede vectorizar.
++fn hay_imagen(app: &VectorcraftApp) -> bool {
++    TraceRun::prepare(&app.session, TRAZAR, &parametros(None, "Auto Color")).is_ok()
++}
++
++/// Atiende la red y el trazado (cada cuadro, con la ventana abierta o no).
++pub fn actualizar(app: &mut VectorcraftApp, ctx: &egui::Context) {
++    if let Some(rx) = app.jacnex_ia.info_rx.as_ref() {
++        match rx.try_recv() {
++            Ok(r) => {
++                app.jacnex_ia.info_rx = None;
++                match r {
++                    Ok(i) => {
++                        app.jacnex_ia.info = Some(i);
++                        app.jacnex_ia.info_error = None;
++                    }
++                    Err(e) => app.jacnex_ia.info_error = Some(e),
++                }
++            }
++            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(250)),
++            Err(TryRecvError::Disconnected) => app.jacnex_ia.info_rx = None,
++        }
++    }
++    actualizar_trabajo(app, ctx);
++    actualizar_trazo(app, ctx);
++}
++
++fn actualizar_trabajo(app: &mut VectorcraftApp, ctx: &egui::Context) {
++    // Como el Calco de imagen: no mientras un diálogo o una edición con el puntero están abiertos.
++    let esperar = app.ui.dialog.is_some() || app.session.in_interaction() || (app.session.tool_busy() && app.session.pointer_held());
++    let Some(t) = app.jacnex_ia.trabajo.as_mut() else { return };
++    let mut fin: Option<Result<(Vec<u8>, u32, u32), String>> = None;
++    loop {
++        match t.rx.try_recv() {
++            Ok(Evento::Etapa(s)) => t.etapa = s,
++            Ok(Evento::Cobrado { saldo }) => {
++                if let (Some(i), Some(s)) = (app.jacnex_ia.info.as_mut(), saldo) {
++                    i.creditos = s;
++                }
++            }
++            Ok(Evento::Listo(png, w, h)) => fin = Some(Ok((png, w, h))),
++            Ok(Evento::Error(e)) => fin = Some(Err(e)),
++            Err(TryRecvError::Empty) => break,
++            Err(TryRecvError::Disconnected) => {
++                fin.get_or_insert_with(|| Err("La generación se interrumpió.".into()));
++                break;
++            }
++        }
++        if fin.is_some() {
++            break;
++        }
++    }
++    let Some(fin) = fin else {
++        ctx.request_repaint_after(Duration::from_millis(200));
++        return;
++    };
++    if fin.is_ok() && esperar {
++        // Vuelve a intentarlo en el próximo cuadro, con el resultado guardado.
++        let (tx, rx) = std::sync::mpsc::channel();
++        if let Ok((png, w, h)) = fin {
++            let _ = tx.send(Evento::Listo(png, w, h));
++        }
++        t.rx = rx;
++        ctx.request_repaint_after(Duration::from_millis(200));
++        return;
++    }
++    let doc = t.doc;
++    app.jacnex_ia.trabajo = None;
++    let r = fin.and_then(|(png, w, h)| colocar(app, doc, &png, w, h)).and_then(|id| vectorizar(app, Some(id), true).map_err(|e| mensaje_trazo(&e)));
++    if let Err(m) = r {
++        app.jacnex_ia.aviso = Some((false, m));
++    }
++    pedir_info(&mut app.jacnex_ia);
++    ctx.request_repaint();
++}
++
++fn actualizar_trazo(app: &mut VectorcraftApp, ctx: &egui::Context) {
++    let Some(t) = app.jacnex_ia.trazo.as_ref() else { return };
++    if app.ui.dialog.is_some() || app.session.in_interaction() || (app.session.tool_busy() && app.session.pointer_held()) {
++        ctx.request_repaint_after(Duration::from_millis(200));
++        return;
++    }
++    let r = match t.rx.try_recv() {
++        Ok(r) => r,
++        Err(TryRecvError::Empty) => {
++            ctx.request_repaint_after(Duration::from_millis(150));
++            return;
++        }
++        Err(TryRecvError::Disconnected) => Err("el trazado se detuvo".into()),
++    };
++    let (doc, de_ia) = (t.doc, t.de_ia);
++    app.jacnex_ia.trazo = None;
++    let aviso = match r {
++        Ok((run, traced, plana)) => match app.session.documents().iter().position(|st| st.uid == doc) {
++            None => (false, "El documento se cerró antes de terminar de vectorizar.".to_string()),
++            Some(i) => {
++                app.session.set_active(i);
++                if run.current(&app.session) {
++                    traced.hand_in(&mut app.session);
++                    match app.run(run.command(), run.params().clone()) {
++                        Ok(_) => (true, listo(plana, de_ia)),
++                        Err(e) => (false, mensaje_trazo(&e)),
++                    }
++                } else {
++                    (false, "La imagen cambió mientras se vectorizaba: vuelve a intentarlo.".to_string())
++                }
++            }
++        },
++        Err(e) => (false, mensaje_trazo(&e)),
++    };
++    app.jacnex_ia.aviso = Some(aviso);
++    ctx.request_repaint();
++}
++
++/// Abre o cierra la ventana «IA de Jacnex» (Objeto › IA de Jacnex…).
++pub fn alternar(app: &mut VectorcraftApp) {
++    let e = &mut app.jacnex_ia;
++    e.abierta = !e.abierta;
++    if e.abierta {
++        pedir_info(e);
++    }
++}
++
++// --- Ventana ----------------------------------------------------------------------------------
++
++const ACENTO: Color32 = Color32::from_rgb(124, 92, 255);
++const ACENTO_CLARO: Color32 = Color32::from_rgb(205, 191, 255);
++const ROJO: Color32 = Color32::from_rgb(230, 120, 90);
++const VERDE: Color32 = Color32::from_rgb(110, 200, 140);
++const ANCHO: f32 = 330.0;
++/// El ancho de las etiquetas de Ajustes.
++const ETIQUETA: f32 = 86.0;
++
++/// `1236` → `1 236`.
++fn miles(n: i64) -> String {
++    let s = n.unsigned_abs().to_string();
++    let mut out = String::new();
++    for (i, c) in s.chars().enumerate() {
++        if i > 0 && (s.len() - i).is_multiple_of(3) {
++            out.push(' ');
++        }
++        out.push(c);
++    }
++    if n < 0 { format!("-{out}") } else { out }
++}
++
++fn creditos(c: i64) -> String {
++    if c == 1 { "1 crédito".into() } else { format!("{} créditos", miles(c)) }
++}
++
++fn imagen(icono: &str, tam: f32, tinte: Color32) -> egui::Image<'static> {
++    egui::Image::new(crate::icons::source(icono)).tint(tinte).fit_to_exact_size(egui::vec2(tam, tam))
++}
++
++/// El botón principal, de color: ícono y texto centrados.
++fn boton_acento(ui: &mut egui::Ui, icono: &str, texto: &str, tam: egui::Vec2, activo: bool) -> egui::Response {
++    let b = egui::Button::new((egui::Atom::grow(), imagen(icono, 15.0, Color32::WHITE), RichText::new(texto).strong().color(Color32::WHITE), egui::Atom::grow()))
++        .fill(ACENTO)
++        .corner_radius(8.0)
++        .min_size(tam);
++    ui.add_enabled(activo, b)
++}
++
++/// El título de una sección, en versalitas tenues.
++fn titulo(ui: &mut egui::Ui, texto: &str) -> egui::Response {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    ui.label(RichText::new(texto.to_uppercase()).size(10.5).strong().color(t.text_dim))
++}
++
++/// Los créditos de la cuenta, en una píldora.
++fn pastilla(ui: &mut egui::Ui, texto: &str) -> egui::Response {
++    let galley = ui.painter().layout_no_wrap(texto.to_string(), egui::FontId::proportional(12.0), ACENTO_CLARO);
++    let (rect, resp) = ui.allocate_exact_size(galley.size() + egui::vec2(18.0, 8.0), egui::Sense::hover());
++    let p = ui.painter();
++    p.rect_filled(rect, rect.height() / 2.0, ACENTO.gamma_multiply(0.22));
++    p.rect_stroke(rect, rect.height() / 2.0, egui::Stroke::new(1.0, ACENTO.gamma_multiply(0.55)), egui::StrokeKind::Inside);
++    p.galley(rect.center() - galley.size() / 2.0, galley, ACENTO_CLARO);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, texto));
++    resp
++}
++
++/// Opciones del mismo ancho, una elegida. Devuelve la que se pulsó.
++fn segmentos(ui: &mut egui::Ui, opciones: &[String], elegida: usize) -> Option<usize> {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let mut pulsada = None;
++    egui::Frame::NONE.fill(t.input).stroke(egui::Stroke::new(1.0, t.input_border)).corner_radius(7.0).inner_margin(2).show(ui, |ui| {
++        ui.spacing_mut().item_spacing.x = 2.0;
++        let n = opciones.len().max(1) as f32;
++        let w = ((ui.available_width() - 2.0 * (n - 1.0)) / n).max(20.0);
++        ui.horizontal(|ui| {
++            for (i, o) in opciones.iter().enumerate() {
++                let on = i == elegida;
++                let texto = RichText::new(o.as_str()).color(if on { Color32::WHITE } else { t.text_dim });
++                let fondo = if on { ACENTO.gamma_multiply(0.55) } else { Color32::TRANSPARENT };
++                let b = egui::Button::new(texto).fill(fondo).frame_when_inactive(on).min_size(egui::vec2(w, 22.0)).corner_radius(5.0);
++                if ui.add(b).clicked() {
++                    pulsada = Some(i);
++                }
++            }
++        });
++    });
++    pulsada
++}
++
++/// Una fila de Ajustes: etiqueta a la izquierda, control a la derecha.
++fn fila<R>(ui: &mut egui::Ui, etiqueta: &str, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    ui.horizontal(|ui| {
++        ui.allocate_ui_with_layout(egui::vec2(ETIQUETA, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
++            ui.set_min_width(ETIQUETA);
++            ui.label(RichText::new(etiqueta).color(t.text_dim));
++        });
++        control(ui)
++    })
++    .inner
++}
++
++/// Lo que la ventana pide hacer al cerrarse el cuadro.
++#[derive(Default)]
++struct Pedidos {
++    cerrar: bool,
++    generar: bool,
++    vectorizar: bool,
++}
++
++/// La ventana «IA de Jacnex» (y lo que la IA tenga en curso, aunque esté cerrada).
++pub fn ventana(app: &mut VectorcraftApp, ctx: &egui::Context) {
++    actualizar(app, ctx);
++    if !app.jacnex_ia.abierta {
++        return;
++    }
++    let mut pide = Pedidos::default();
++    let imagen_lista = !app.jacnex_ia.ocupado() && hay_imagen(app);
++    let alto = ctx.content_rect().height();
++    egui::Window::new("IA de Jacnex")
++        .id(egui::Id::unique("jacnex-ia-ventana"))
++        .title_bar(false)
++        .resizable(false)
++        .default_width(ANCHO)
++        .show(ctx, |ui| {
++            ui.set_width(ANCHO);
++            let t = crate::theme::Tokens::get(ui.ctx());
++            let e = &mut app.jacnex_ia;
++            let sesion = e.con_sesion || e.local.is_some();
++            ui.horizontal(|ui| {
++                ui.add(imagen("sparkles", 16.0, ACENTO_CLARO));
++                ui.label(RichText::new("IA de Jacnex").strong().size(14.0).color(t.text));
++                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                    if crate::widgets::icon_button(ui, "x", "Cerrar", false, 22.0).clicked() {
++                        pide.cerrar = true;
++                    }
++                    if sesion && crate::widgets::icon_button(ui, "rotate-cw", "Actualizar saldo", false, 22.0).clicked() {
++                        pedir_info(e);
++                    }
++                    if let Some(i) = &e.info {
++                        let r = pastilla(ui, &creditos(i.creditos));
++                        if !i.nombre.is_empty() {
++                            r.on_hover_text(format!("Cuenta: {}", i.nombre));
++                        }
++                    }
++                });
++            });
++            if !sesion {
++                ui.label(RichText::new("Inicia sesión en Jacnex Studio para usar la IA.").small().color(t.text_dim));
++            }
++            if let Some(err) = &e.info_error {
++                ui.label(RichText::new(err.as_str()).small().color(ROJO));
++            }
++            ui.add_space(4.0);
++            ui.separator();
++            egui::ScrollArea::vertical().max_height(alto * 0.6).auto_shrink([false, true]).show(ui, |ui| cuerpo(ui, e));
++            ui.separator();
++            ui.add_space(4.0);
++            pie(ui, e, imagen_lista, &mut pide);
++        });
++    if pide.cerrar {
++        app.jacnex_ia.abierta = false;
++    }
++    if pide.generar {
++        generar(app);
++    }
++    if pide.vectorizar {
++        vectorizar_seleccion(app);
++    }
++}
++
++fn cuerpo(ui: &mut egui::Ui, e: &mut Estado) {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    ui.add_space(6.0);
++    titulo(ui, "Qué quieres crear");
++    let nombres: Vec<String> = Estilo::TODOS.iter().map(|s| s.nombre().to_string()).collect();
++    let elegido = Estilo::TODOS.iter().position(|s| *s == e.estilo).unwrap_or(0);
++    if let Some(i) = segmentos(ui, &nombres, elegido)
++        && let Some(s) = Estilo::TODOS.get(i)
++    {
++        e.estilo = *s;
++    }
++    ui.label(RichText::new(e.estilo.explicacion()).small().color(t.text_dim));
++    ui.add_space(8.0);
++    titulo(ui, "Descríbelo");
++    ui.add(egui::TextEdit::multiline(&mut e.prompt).hint_text(e.estilo.pista()).desired_rows(3).desired_width(f32::INFINITY));
++    ui.horizontal_wrapped(|ui| {
++        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
++        for idea in e.estilo.ideas() {
++            if ui.small_button(format!("+ {idea}")).clicked() {
++                e.prompt = (*idea).to_string();
++            }
++        }
++    });
++    ui.add_space(8.0);
++    titulo(ui, "Ajustes");
++    let modelos = e.modelos();
++    let actual = e.modelo_actual();
++    fila(ui, "Modelo", |ui| {
++        egui::ComboBox::from_id_salt("jacnex-ia-modelo").selected_text(actual.nombre.as_str()).width(ui.available_width()).show_ui(ui, |ui| {
++            for m in &modelos {
++                let costo = m.costo("1k").map(|c| format!(" · {}", creditos(c))).unwrap_or_default();
++                if ui.selectable_label(m.id == actual.id, format!("{}{costo}", m.nombre)).on_hover_text(m.descripcion.as_str()).clicked() {
++                    e.modelo = m.id.clone();
++                }
++            }
++        });
++    });
++    if !actual.descripcion.is_empty() {
++        ui.label(RichText::new(actual.descripcion.as_str()).small().color(t.text_dim));
++    }
++    fila(ui, "Proporción", |ui| {
++        let nombres: Vec<String> = Proporcion::TODAS.iter().map(|p| p.nombre()).collect();
++        let elegida = Proporcion::TODAS.iter().position(|p| *p == e.proporcion).unwrap_or(0);
++        if let Some(i) = segmentos(ui, &nombres, elegida)
++            && let Some(p) = Proporcion::TODAS.get(i)
++        {
++            e.proporcion = *p;
++        }
++    });
++    ui.add_space(6.0);
++    ui.label(
++        RichText::new("La IA dibuja tu idea en colores planos y Vectornex la convierte en trazados editables, agrupados por color.")
++            .small()
++            .color(t.text_dim),
++    );
++    ui.add_space(4.0);
++}
++
++fn pie(ui: &mut egui::Ui, e: &mut Estado, imagen_lista: bool, pide: &mut Pedidos) {
++    let t = crate::theme::Tokens::get(ui.ctx());
++    let ancho = ui.available_width();
++    if let Some(tr) = &e.trabajo {
++        ui.horizontal(|ui| {
++            ui.add(egui::Spinner::new().color(ACENTO));
++            ui.label(RichText::new(format!("{}  {} s", tr.etapa, tr.inicio.elapsed().as_secs())).strong());
++        });
++        ui.label(RichText::new("Suele tardar 10–40 s. Puedes seguir trabajando.").small().color(t.text_dim));
++    } else if let Some(tz) = &e.trazo {
++        ui.horizontal(|ui| {
++            ui.add(egui::Spinner::new().color(ACENTO));
++            ui.label(RichText::new(format!("Convirtiendo en vector…  {} s", tz.inicio.elapsed().as_secs())).strong());
++        });
++    } else {
++        let costo = e.costo();
++        if let Some(c) = costo {
++            ui.horizontal(|ui| {
++                ui.label(RichText::new(creditos(c)).small().strong().color(ACENTO_CLARO));
++                if let Some(i) = &e.info {
++                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                        if i.creditos >= c {
++                            ui.label(RichText::new(format!("Te quedan {}", miles(i.creditos - c))).small().color(t.text_dim));
++                        } else {
++                            ui.label(RichText::new(format!("Te faltan {}", miles(c - i.creditos))).small().color(ROJO));
++                        }
++                    });
++                }
++            });
++            ui.add_space(2.0);
++        }
++        let texto = match costo {
++            Some(c) => format!("Crear vector · {}", creditos(c)),
++            None => "Crear vector".to_string(),
++        };
++        let f = falta(e);
++        if boton_acento(ui, "sparkles", &texto, egui::vec2(ancho, 36.0), f.is_none()).clicked() {
++            pide.generar = true;
++        }
++        if let Some(f) = f {
++            ui.label(RichText::new(f).small().color(t.text_dim));
++        }
++    }
++    if let Some((ok, m)) = &e.aviso {
++        ui.add_space(2.0);
++        ui.label(RichText::new(m.as_str()).small().color(if *ok { VERDE } else { ROJO }));
++    }
++    ui.add_space(6.0);
++    ui.horizontal(|ui| {
++        let b = egui::Button::new((imagen("image", 14.0, t.text), "Vectorizar la imagen seleccionada")).frame(false);
++        if ui.add_enabled(imagen_lista, b).on_hover_text("Sin IA ni créditos: convierte en vector una imagen colocada.").clicked() {
++            pide.vectorizar = true;
++        }
++    });
++    ui.add_space(2.0);
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use vectorcraft_engine::Session;
++
++    fn app() -> VectorcraftApp {
++        VectorcraftApp::new(Session::new(), Default::default())
++    }
++
++    /// Un PNG `w`×`h` con `px(x, y)`.
++    fn png(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
++        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba(px(x, y)));
++        let mut out = Vec::new();
++        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
++        out
++    }
++
++    /// Un logo plano: un círculo rojo y un cuadrado azul sobre blanco.
++    fn logo() -> Vec<u8> {
++        png(200, 200, |x, y| {
++            let (dx, dy) = (x as i32 - 70, y as i32 - 100);
++            if dx * dx + dy * dy < 40 * 40 {
++                [220, 30, 40, 255]
++            } else if (120..170).contains(&x) && (75..125).contains(&y) {
++                [30, 60, 220, 255]
++            } else {
++                [255, 255, 255, 255]
++            }
++        })
++    }
++
++    /// Los colores de relleno de los trazados del documento activo: cuántos se parecen al rojo y al
++    /// azul del logo, y cuántos hay en total.
++    fn rellenos(app: &VectorcraftApp) -> (usize, usize, usize) {
++        let mut todos: Vec<[u8; 4]> = Vec::new();
++        app.session.active().unwrap().doc.walk(|n| {
++            if let vectorcraft_color::Paint::Solid { color, .. } = n.appearance.fill_paint() {
++                let c = color.to_rgba8(1.0);
++                if !todos.contains(&c) {
++                    todos.push(c);
++                }
++            }
++        });
++        let cerca = |a: [u8; 4], b: [u8; 3]| (0..3).all(|i| (i32::from(a[i]) - i32::from(b[i])).abs() < 24);
++        let rojos = todos.iter().filter(|c| cerca(**c, [220, 30, 40])).count();
++        let azules = todos.iter().filter(|c| cerca(**c, [30, 60, 220])).count();
++        (rojos, azules, todos.len())
++    }
++
++    fn sin_imagenes(app: &VectorcraftApp) -> bool {
++        let d = app.session.active().unwrap();
++        !format!("{:?}", d.doc).contains("Image(")
++    }
++
++    #[test]
++    fn the_default_model_is_the_most_popular_and_the_list_is_by_popularity() {
++        let e = Estado::default();
++        assert_eq!(e.modelo_actual().nombre, "Google Nano Banana 2");
++        let ids: Vec<String> = e.modelos().into_iter().map(|m| m.id).collect();
++        assert_eq!(&ids[..3], &["nano-banana-2", "nano-banana-pro", "gpt-image-2"]);
++        // Aunque el servidor los mande en otro orden.
++        let info = leer_info(&json!({"creditos": 50, "modelos": [
++            {"id": "nano-banana", "nombre": "Nano Banana", "proveedor": "Google", "tipo": "imagen", "creditos": {"unica": 9}},
++            {"id": "ideogram-edit", "nombre": "Ideogram 3.0", "tipo": "herramienta", "creditos": {"unica": 7}},
++            {"id": "nano-banana-2", "nombre": "Nano Banana 2", "proveedor": "Google", "tipo": "imagen", "creditos": {"1k": 12}}
++        ]}));
++        let e = Estado { info: Some(info), ..Default::default() };
++        let ids: Vec<String> = e.modelos().into_iter().map(|m| m.id).collect();
++        assert_eq!(ids, ["nano-banana-2", "nano-banana"]);
++        assert_eq!(e.costo(), Some(12));
++    }
++
++    #[test]
++    fn the_instructions_ask_for_flat_art_on_white() {
++        for s in Estilo::TODOS {
++            let p = s.instrucciones("  un colibrí  ");
++            assert!(p.contains(": un colibrí."), "{p}");
++            assert!(p.contains("no gradients") && p.contains("pure white background"), "{p}");
++        }
++    }
++
++    #[test]
++    fn a_flat_image_becomes_paths_grouped_by_color() {
++        let mut app = app();
++        let id = colocar(&mut app, None, &logo(), 200, 200).unwrap();
++        vectorizar(&mut app, Some(id), true).unwrap();
++        assert_eq!(app.jacnex_ia.aviso.as_ref().map(|a| a.0), Some(true), "{:?}", app.jacnex_ia.aviso);
++        assert!(app.jacnex_ia.aviso.as_ref().unwrap().1.contains("Ctrl+Z"), "Flat Logo: {:?}", app.jacnex_ia.aviso);
++        assert!(sin_imagenes(&app), "la imagen se convirtió en trazados");
++        assert_eq!(rellenos(&app), (1, 1, 2), "rojo y azul, sin el blanco");
++    }
++
++    /// Como en la app: el trazado va en un hilo aparte y se aplica al terminar (un paso de deshacer).
++    #[test]
++    fn off_the_ui_thread_the_trace_is_applied_when_done() {
++        let mut app = app();
++        app.trace_runs.off_the_ui_thread = true;
++        let id = colocar(&mut app, None, &logo(), 200, 200).unwrap();
++        vectorizar(&mut app, Some(id), true).unwrap();
++        assert!(ocupado(&app), "el trazado va en un hilo");
++        let ctx = egui::Context::default();
++        let inicio = Instant::now();
++        while ocupado(&app) {
++            assert!(inicio.elapsed() < Duration::from_secs(30), "el trazado no terminó");
++            actualizar(&mut app, &ctx);
++            std::thread::sleep(Duration::from_millis(10));
++        }
++        let aviso = app.jacnex_ia.aviso.clone().unwrap();
++        assert!(aviso.0 && aviso.1.contains("Ctrl+Z"), "{aviso:?}");
++        assert!(sin_imagenes(&app));
++        assert_eq!(rellenos(&app), (1, 1, 2));
++        // Un gradiente, también en el hilo, cae a Auto Color.
++        let degradado = png(120, 90, |x, y| [(x * 2) as u8, (y * 2) as u8, 128, 255]);
++        let id = colocar(&mut app, None, &degradado, 120, 90).unwrap();
++        vectorizar(&mut app, Some(id), true).unwrap();
++        while ocupado(&app) {
++            assert!(inicio.elapsed() < Duration::from_secs(60), "el trazado no terminó");
++            actualizar(&mut app, &ctx);
++            std::thread::sleep(Duration::from_millis(10));
++        }
++        let aviso = app.jacnex_ia.aviso.clone().unwrap();
++        assert!(aviso.0 && aviso.1.contains("degradados"), "{aviso:?}");
++    }
++
++    #[test]
++    fn a_gradient_falls_back_to_auto_color() {
++        let mut app = app();
++        let degradado = png(200, 150, |x, y| [(x * 255 / 199) as u8, (y * 255 / 149) as u8, 128, 255]);
++        let id = colocar(&mut app, None, &degradado, 200, 150).unwrap();
++        vectorizar(&mut app, Some(id), true).unwrap();
++        let aviso = app.jacnex_ia.aviso.clone().unwrap();
++        assert!(aviso.0, "{aviso:?}");
++        assert!(aviso.1.contains("degradados"), "{aviso:?}");
++        assert!(sin_imagenes(&app));
++    }
++
++    #[test]
++    fn the_result_goes_to_its_document_inside_the_artboard() {
++        let mut app = app();
++        app.run("file.new", json!({"width": 500, "height": 400})).unwrap();
++        let uid = app.session.active().unwrap().uid;
++        let id = colocar(&mut app, Some(uid), &logo(), 200, 200).unwrap();
++        let v = app.run("object.info", json!({"id": id})).ok();
++        assert_eq!(app.session.documents().len(), 1, "no abre otro documento");
++        if let Some(b) = v.as_ref().and_then(|v| v.get("bounds")).and_then(Value::as_array) {
++            let n: Vec<f64> = b.iter().filter_map(Value::as_f64).collect();
++            assert!(n.iter().all(|x| (0.0..=500.0).contains(x)), "{n:?}");
++        }
++    }
++
++    #[test]
++    fn vectorizing_without_an_image_selected_says_what_to_do() {
++        let mut app = app();
++        app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
++        vectorizar_seleccion(&mut app);
++        let aviso = app.jacnex_ia.aviso.clone().unwrap();
++        assert!(!aviso.0 && aviso.1.contains("selecciona una imagen"), "{aviso:?}");
++    }
++
++    #[test]
++    fn generating_needs_a_description_and_an_account() {
++        let mut app = app();
++        assert!(usar_servidor_local(&mut app, "http://127.0.0.1:9", "jk_prueba"));
++        assert!(!usar_servidor_local(&mut app, "https://otro.sitio", "jk_prueba"));
++        generar(&mut app);
++        assert_eq!(app.jacnex_ia.aviso.clone().map(|a| a.1), Some("Describe lo que quieres crear.".into()));
++        assert!(!ocupado(&app));
++    }
++
++    /// Un /v1/jacnex falso: estado, generar, trabajo (listo a la segunda consulta) y el logo.
++    fn servidor_falso() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
++        use std::io::{BufRead, BufReader, Read, Write};
++        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
++        let recibido = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
++        let (r2, base2) = (recibido.clone(), base.clone());
++        std::thread::spawn(move || {
++            let mut consultas = 0;
++            for s in l.incoming() {
++                let Ok(mut s) = s else { continue };
++                let mut lector = BufReader::new(s.try_clone().unwrap());
++                let mut linea = String::new();
++                if lector.read_line(&mut linea).is_err() {
++                    continue;
++                }
++                let mut largo = 0usize;
++                loop {
++                    let mut h = String::new();
++                    if lector.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
++                        break;
++                    }
++                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
++                        largo = v.trim().parse().unwrap();
++                    }
++                }
++                let mut cuerpo = vec![0; largo];
++                let _ = lector.read_exact(&mut cuerpo);
++                let ruta = linea.split_whitespace().nth(1).unwrap_or("").to_string();
++                let (tipo, datos) = if ruta == "/r/logo.png" {
++                    ("image/png", logo())
++                } else if ruta == "/v1/jacnex/estado" {
++                    let v = json!({"nombre": "Prueba", "creditos": 100, "modelos": [
++                        {"id": "nano-banana-2", "nombre": "Nano Banana 2", "proveedor": "Google", "tipo": "imagen", "aspectos": ["1:1", "4:3", "3:4", "16:9"], "creditos": {"1k": 12}}
++                    ]});
++                    ("application/json", v.to_string().into_bytes())
++                } else if ruta == "/v1/jacnex/generar" {
++                    r2.lock().unwrap().push(String::from_utf8_lossy(&cuerpo).into_owned());
++                    ("application/json", json!({"id": "t1", "creditos": 12, "saldo": 88}).to_string().into_bytes())
++                } else {
++                    consultas += 1;
++                    let v = if consultas < 2 { json!({"estado": "procesando"}) } else { json!({"estado": "listo", "resultados": [format!("{base2}/r/logo.png")]}) };
++                    ("application/json", v.to_string().into_bytes())
++                };
++                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: {tipo}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", datos.len());
++                let _ = s.write_all(&datos);
++            }
++        });
++        (base, recibido)
++    }
++
++    #[test]
++    fn generating_places_the_image_and_vectorizes_it() {
++        let (base, recibido) = servidor_falso();
++        let mut app = app();
++        assert!(usar_servidor_local(&mut app, &base, "jk_prueba"));
++        alternar(&mut app);
++        app.jacnex_ia.prompt = "un círculo rojo y un cuadrado azul".into();
++        let ctx = egui::Context::default();
++        let inicio = Instant::now();
++        while app.jacnex_ia.info.is_none() {
++            assert!(inicio.elapsed() < Duration::from_secs(20), "el catálogo no llegó");
++            actualizar(&mut app, &ctx);
++            std::thread::sleep(Duration::from_millis(20));
++        }
++        generar(&mut app);
++        assert!(ocupado(&app), "{:?}", app.jacnex_ia.aviso);
++        while ocupado(&app) {
++            assert!(inicio.elapsed() < Duration::from_secs(60), "el resultado no llegó");
++            actualizar(&mut app, &ctx);
++            std::thread::sleep(Duration::from_millis(20));
++        }
++        let aviso = app.jacnex_ia.aviso.clone().unwrap();
++        assert!(aviso.0, "{aviso:?}");
++        assert_eq!(app.session.documents().len(), 1, "un documento nuevo para el diseño");
++        assert!(sin_imagenes(&app));
++        assert_eq!(rellenos(&app), (1, 1, 2));
++        let pedido = recibido.lock().unwrap().join("\n");
++        assert!(pedido.contains("nano-banana-2") && pedido.contains("flat vector logo") && pedido.contains("1024x1024"), "{pedido}");
++        // Tras cobrar muestra el saldo que dio el servidor y luego lo vuelve a pedir.
++        while app.jacnex_ia.info_rx.is_some() {
++            assert!(inicio.elapsed() < Duration::from_secs(60), "el saldo no llegó");
++            actualizar(&mut app, &ctx);
++            std::thread::sleep(Duration::from_millis(20));
++        }
++        assert_eq!(app.jacnex_ia.info.as_ref().map(|i| i.creditos), Some(100), "el saldo se vuelve a pedir");
++    }
++
++    #[test]
++    fn the_window_shows_the_steps() {
++        let mut app = app();
++        alternar(&mut app);
++        let texto = crate::tests_labels::painted_text(&mut app, |app, ui| ventana(app, ui.ctx()));
++        for t in ["IA DE JACNEX", "QUÉ QUIERES CREAR", "Logo", "Mascota", "Google Nano Banana 2", "Crear vector", "Vectorizar la imagen seleccionada"] {
++            assert!(texto.to_uppercase().contains(&t.to_uppercase()), "{t}: {texto}");
++        }
++    }
++}
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index da9d2ab..cb7b26a 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -83,6 +83,7 @@ pub mod toolbar;
+ mod tools_float;
+ pub mod touch;
+ pub mod trace_runs;
++pub mod jacnex_ia;
+ mod ui_fonts;
+ pub mod unsaved;
+ pub mod updates_ui;
+@@ -268,6 +269,8 @@ pub struct VectorcraftApp {
+     pub placing: placing::Placing,
+     /// Image Traces running off the UI thread ([`trace_runs`]).
+     pub trace_runs: trace_runs::TraceRuns,
++    /// La IA de Jacnex: de una idea a vector editable ([`jacnex_ia`]).
++    pub jacnex_ia: jacnex_ia::Estado,
+     /// Data Recovery's timer and startup question ([`recovery`]).
+     pub recovery: recovery::Timer,
+     /// Modifiers the keyboard holds (from the host's input), given back after synthetic input.
+diff --git a/crates/ui-egui/src/menus/run.rs b/crates/ui-egui/src/menus/run.rs
+index 8661ab8..4982cf0 100644
+--- a/crates/ui-egui/src/menus/run.rs
++++ b/crates/ui-egui/src/menus/run.rs
+@@ -668,6 +668,10 @@ fn run_ui_part6(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<Result<
+ fn run_ui_part7(app: &mut VectorcraftApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
+     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+     let r = match id {
++        "jacnex.ia" => {
++            crate::jacnex_ia::alternar(app);
++            Ok(Value::Null)
++        }
+         "help.about" => {
+             app.ui.about = true;
+             Ok(Value::Null)
+diff --git a/crates/ui-egui/src/menus/tree.rs b/crates/ui-egui/src/menus/tree.rs
+index aee0c0c..1d46246 100644
+--- a/crates/ui-egui/src/menus/tree.rs
++++ b/crates/ui-egui/src/menus/tree.rs
+@@ -324,6 +324,7 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
+                         c("Expand", "imageTrace.expand"),
+                     ],
+                 ),
++                c("Jacnex AI…", "jacnex.ia"),
+                 sub(
+                     "Text Wrap",
+                     vec![
+diff --git a/crates/ui-egui/src/menus/ui_commands.rs b/crates/ui-egui/src/menus/ui_commands.rs
+index 7a82ec9..4db8cd2 100644
+--- a/crates/ui-egui/src/menus/ui_commands.rs
++++ b/crates/ui-egui/src/menus/ui_commands.rs
+@@ -740,6 +740,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[
+         "",
+         "{} opens the Save PDF dialog; with params = document.exportPdf options written to path (asked when missing; viewAfterSaving opens the file) → {path, bytes, warnings}",
+     ),
++    ("jacnex.ia", "Jacnex AI…", "", "{} opens or closes the Jacnex AI window: an idea drawn by an AI model in flat colours, then traced into editable paths grouped by colour"),
+     ("help.about", "About Vectornex", "", "{}"),
+     ("help.checkForUpdates", "Check for Updates…", "", "{}"),
+     ("help.commandPalette", "Search Commands…", "Cmd+Shift+/", "{}"),
