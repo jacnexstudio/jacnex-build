@@ -160,13 +160,50 @@ def colores(carpeta):
         raise ErrorDeParche(f"{src}: no hay theme.rs")
     for archivo in archivos:
         texto = archivo.read_text(encoding="utf-8")
-        # Las pruebas comparan con los colores originales: se dejan como están.
-        corte = texto.find("#[cfg(test)]")
-        cuerpo, pruebas = (texto, "") if corte < 0 else (texto[:corte], texto[corte:])
-        nuevo = "".join(_recolorear_linea(l) for l in cuerpo.splitlines(keepends=True)) + pruebas
+        # Las pruebas se recolorean igual: comparan la paleta con valores escritos a mano, que
+        # deben ser los de Jacnex (si no, fallan aunque la paleta esté bien).
+        nuevo = "".join(_recolorear_linea(l) for l in texto.splitlines(keepends=True))
         if nuevo != texto:
             archivo.write_text(nuevo, encoding="utf-8", newline="")
+    resaltado_por_defecto(carpeta)
     return len(archivos)
+
+
+def _reemplazar_linea(ruta, viejo, nuevas):
+    """Cambia la línea `viejo` (sin su fin de línea, una sola vez) por las `nuevas`, conservando
+    los finales de línea del archivo."""
+    datos = ruta.read_bytes().decode("utf-8")
+    fin = "\r\n" if "\r\n" in datos else "\n"
+    if datos.count(viejo) != 1:
+        raise ErrorDeParche(f"{ruta}: no se encontró una vez {viejo!r}")
+    ruta.write_bytes(datos.replace(viejo, fin.join(nuevas)).encode("utf-8"))
+
+
+def resaltado_por_defecto(carpeta):
+    """El color de resaltado por defecto (Ajustes › Apariencia) pasa al azul Jacnex.
+
+    Si no, el tema recoloreado se pinta encima con el azul original. Quien ya lo tenía guardado
+    (el azul original) ve el del tema. Solo en las apps que tienen ese ajuste.
+    """
+    prefs = carpeta / "crates" / "engine" / "src" / "settings" / "prefs.rs"
+    if not prefs.exists():
+        return
+    m = re.search(r'pub const DEFAULT_HIGHLIGHT: &str = "#([0-9a-fA-F]{6})";', prefs.read_text(encoding="utf-8"))
+    if not m:
+        return
+    h = m.group(1)
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    nr, ng, nb = transformar_color(r, g, b)
+    if (nr, ng, nb) == (r, g, b):
+        return
+    _reemplazar_linea(prefs, m.group(0), [f'pub const DEFAULT_HIGHLIGHT: &str = "#{nr:02x}{ng:02x}{nb:02x}";'])
+    app = carpeta / "crates" / "ui-egui" / "src" / "app" / "prefs.rs"
+    linea = "        let highlight = filmcraft_engine::settings::parse_hex(&a.highlight_color);"
+    if app.exists() and linea in app.read_text(encoding="utf-8"):
+        _reemplazar_linea(app, linea, [
+            "        // Jacnex: the original default highlight (saved before the Jacnex blue) shows the theme's own blue.",
+            f"        let highlight = filmcraft_engine::settings::parse_hex(&a.highlight_color).filter(|c| *c != [0x{r:02x}, 0x{g:02x}, 0x{b:02x}]);",
+        ])
 
 
 # --- Tipografía -----------------------------------------------------------------------------------

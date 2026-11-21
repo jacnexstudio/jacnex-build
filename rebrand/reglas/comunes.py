@@ -228,3 +228,39 @@ def copias_icono(stem, id_hicolor, svg, carpeta):
     for t in TAMANOS_HICOLOR:
         copias.append((f"assets/app-icon/hicolor/{t}x{t}/apps/{id_hicolor}.png", f"generado/{carpeta}/icon-{t}.png"))
     return copias
+
+
+_COPIA_FIJA = re.compile(r'(\w+)\[(\d+)\.\.(\d+)\]\.copy_from_slice\(b"([A-Za-z0-9 ._-]*)"\)')
+
+
+def largos_de_bytes(carpeta):
+    """`x[a..b].copy_from_slice(b"Nombre")` con un largo que ya no cuadra tras el cambio de nombre.
+
+    Un campo de largo fijo (por ejemplo el creador de un DPX: b"Filmcraft" en hd[160..169]) queda
+    con otro largo al cambiar el nombre, y `copy_from_slice` entra en pánico. Se ajusta el rango al
+    largo del texto nuevo solo si cabe en el campo original. Devuelve cuántos se ajustaron.
+    """
+    ajustados = 0
+    for ruta in sorted(carpeta.rglob("*.rs")):
+        if "target" in ruta.relative_to(carpeta).parts:
+            continue
+        texto = ruta.read_bytes().decode("utf-8", errors="surrogateescape")
+
+        def ajustar(m):
+            nonlocal ajustados
+            a, b, lit = int(m.group(2)), int(m.group(3)), m.group(4)
+            largo = len(lit.encode("utf-8"))
+            if b - a == largo:
+                return m.group(0)
+            if largo > b - a:
+                # No se agranda el campo (cambiaría el formato del archivo): se deja y se avisa.
+                print(f"  AVISO: {ruta}: {lit!r} no cabe en {m.group(1)}[{a}..{b}]")
+                return m.group(0)
+            ajustados += 1
+            return f'{m.group(1)}[{a}..{a + largo}].copy_from_slice(b"{lit}")'
+
+        nuevo = _COPIA_FIJA.sub(ajustar, texto)
+        if nuevo != texto:
+            # en bytes, para conservar los finales de línea del archivo
+            ruta.write_bytes(nuevo.encode("utf-8", errors="surrogateescape"))
+    return ajustados

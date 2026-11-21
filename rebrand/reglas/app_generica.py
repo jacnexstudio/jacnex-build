@@ -39,6 +39,7 @@ def crear(app):
         comunes.ajustar_instalador_windows(carpeta, app)
         comunes.identidad_actualizador(carpeta, app, marca, parche)
         idioma.aplicar(carpeta, app, parche)
+        comunes.largos_de_bytes(carpeta)
 
     return SimpleNamespace(nombre_producto=nombre_producto, textos=textos, nombres_de_archivo=nombres_de_archivo,
                            copias_de_marca=copias_de_marca, parches=parches)

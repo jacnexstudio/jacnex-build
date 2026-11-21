@@ -1,0 +1,501 @@
+diff --git a/crates/core/src/jacnex_modelos.rs b/crates/core/src/jacnex_modelos.rs
+new file mode 100644
+index 0000000..371fbd6
+--- /dev/null
++++ b/crates/core/src/jacnex_modelos.rs
+@@ -0,0 +1,201 @@
++//! Jacnex: los modelos de IA que se bajan junto con una app (hoy, los de Filmnex: voz, vertical y
++//! búsqueda), para que la app nunca pida una descarga.
++//!
++//! Solo datos: de dónde se baja cada archivo, su SHA-256 y su tamaño. La descarga está en el
++//! backend (`jacnex_modelos` de `jacnex-studio-native`) y la tarjeta de la app suma [`total`].
++//! Cada modelo queda en `<datos de Jacnex Studio>/modelos/<carpeta>/`, que es donde la app lo
++//! busca.
++
++/// Un archivo de un modelo.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Archivo {
++    /// La ruta dentro de la carpeta del modelo (y al final de la URL); `/` separa subcarpetas.
++    pub nombre: &'static str,
++    pub sha256: &'static str,
++    pub tamano: u64,
++}
++
++/// Un modelo: una carpeta con sus archivos.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Modelo {
++    /// La carpeta (el id que usa la app para encontrarlo).
++    pub carpeta: &'static str,
++    /// La URL a la que se suma el nombre de cada archivo (una versión fija, nunca «main»).
++    pub base: &'static str,
++    pub licencia: &'static str,
++    pub archivos: &'static [Archivo],
++}
++
++impl Modelo {
++    pub fn url(&self, a: &Archivo) -> String {
++        format!("{}/{}", self.base.trim_end_matches('/'), a.nombre)
++    }
++
++    pub fn tamano(&self) -> u64 {
++        self.archivos.iter().map(|a| a.tamano).fold(0, u64::saturating_add)
++    }
++}
++
++/// Filmnex: la voz (transcripción, subtítulos, silencios, muletillas).
++const WHISPER: Modelo = Modelo {
++    carpeta: "whisper-large-v3-turbo",
++    base: "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
++    licencia: "MIT",
++    archivos: &[
++        Archivo { nombre: "config.json", sha256: "c5b526b3e3cd64cd8940dabb45e8ba726629e22d8ed389c29b552f9140daf04a", tamano: 1256 },
++        Archivo { nombre: "generation_config.json", sha256: "cce11bfe3aaa6ae9e072ea2637caaec8795e68d9b67e655a5af16ee509681a4c", tamano: 3772 },
++        Archivo { nombre: "tokenizer.json", sha256: "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd", tamano: 2_710_337 },
++        Archivo { nombre: "model.safetensors", sha256: "542566a422ae4f3fd23f1ba11add198fca01bbf82e66e6a2857b3f608b1eb9d1", tamano: 1_617_824_864 },
++    ],
++};
++
++/// Filmnex, «Vertical»: caras (YuNet, convertido por Jacnex a safetensors; se sirve desde
++/// descargas.jacnex.store con su licencia).
++const YUNET: Modelo = Modelo {
++    carpeta: "reframe-yunet-2023mar",
++    base: "https://descargas.jacnex.store/modelos/reframe-yunet-2023mar/1",
++    licencia: "MIT",
++    archivos: &[
++        Archivo { nombre: "LICENSE", sha256: "c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958", tamano: 1085 },
++        Archivo { nombre: "model.safetensors", sha256: "4bcc9e0c781c96f5b4d778bdb1914dce400373bffc11032cb6e0674939c1555f", tamano: 220_720 },
++    ],
++};
++
++/// Filmnex, «Vertical»: personas cuando no se ve una cara (RT-DETRv2 r18vd, tal cual).
++const RTDETR: Modelo = Modelo {
++    carpeta: "reframe-rtdetrv2-r18vd",
++    base: "https://huggingface.co/PekingU/rtdetr_v2_r18vd/resolve/5650961749fa93567c0d46fc7f43ea4f9e914107",
++    licencia: "Apache-2.0",
++    archivos: &[
++        Archivo { nombre: "config.json", sha256: "ed051ec77cb41c5d9d5e3af21a979b1e890599dfd68434d7636ff82ded4c1527", tamano: 5437 },
++        Archivo { nombre: "model.safetensors", sha256: "d18309d0d7ea57048138885c4c6ecfcb1e24506fc6153b94ad484f8ab62c7115", tamano: 80_904_640 },
++    ],
++};
++
++/// Filmnex, «Vertical»: quién habla (Light-ASD, convertido por Jacnex a safetensors; se sirve desde
++/// descargas.jacnex.store con su licencia).
++const LIGHTASD: Modelo = Modelo {
++    carpeta: "reframe-lightasd-ava",
++    base: "https://descargas.jacnex.store/modelos/reframe-lightasd-ava/1",
++    licencia: "MIT",
++    archivos: &[
++        Archivo { nombre: "LICENSE", sha256: "3c5b187c06d6c0fdcfe02ad73f51470eaa35045cc2e60749d805332d98441eb1", tamano: 1068 },
++        Archivo { nombre: "model.safetensors", sha256: "412c4a668b48100b31f953d7750595a7979c0a0a9a5b1590a90a7cc2f9ef0bc6", tamano: 4_082_848 },
++    ],
++};
++
++/// Filmnex, «Doblaje»: separa la voz de la música (Kim Vocal 2, Mel-Band RoFormer), convertido a safetensors.
++const SEPARAR: Modelo = Modelo {
++    carpeta: "separar-kim-vocal-2",
++    base: "https://descargas.jacnex.store/modelos/separar-kim-vocal-2/1",
++    licencia: "MIT",
++    archivos: &[
++        Archivo { nombre: "LICENSE", sha256: "a1b687a39a37fa357c329644365359c953ac6fe57761287476bb431aedd2af79", tamano: 1593 },
++        Archivo { nombre: "config.json", sha256: "c6c5d00b65c6d7100fb29b0704226904af7a1cd8788c14ea256a354af3dc7032", tamano: 513 },
++        Archivo { nombre: "model.safetensors", sha256: "ec0194fc63229e15794b33a0e22d4591cce72d2b3d04d8c764d1a61010b9ec39", tamano: 457_260_680 },
++    ],
++};
++
++/// Filmnex, «Buscar»: el sentido de lo que se dice (Qwen3-Embedding-0.6B).
++const QWEN: Modelo = Modelo {
++    carpeta: "qwen3-embedding-0.6b",
++    base: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/resolve/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
++    licencia: "Apache-2.0",
++    archivos: &[
++        Archivo { nombre: "config.json", sha256: "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9", tamano: 727 },
++        Archivo { nombre: "tokenizer.json", sha256: "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a", tamano: 11_423_705 },
++        Archivo { nombre: "model.safetensors", sha256: "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd", tamano: 1_191_586_416 },
++    ],
++};
++
++/// Filmnex, «Buscar»: lo que se ve (SigLIP 2 base).
++const SIGLIP: Modelo = Modelo {
++    carpeta: "siglip2-base-patch16-256",
++    base: "https://huggingface.co/google/siglip2-base-patch16-256/resolve/3f9f96cb90da5dbc758b01813f2f6f1aee24c1ab",
++    licencia: "Apache-2.0",
++    archivos: &[
++        Archivo { nombre: "config.json", sha256: "7b5aedcb8893e31376e129c1ffd7a5392f1a806dbc793ce53eda220c2ec59edf", tamano: 276 },
++        Archivo { nombre: "tokenizer.json", sha256: "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322", tamano: 34_363_039 },
++        Archivo { nombre: "model.safetensors", sha256: "6125cacc01fa93bdc98a0c5101cefcd69b2ed1f8ab4f38d86f4ad5984f5dc863", tamano: 1_500_985_224 },
++    ],
++};
++
++const FILMNEX: &[Modelo] = &[WHISPER, YUNET, RTDETR, LIGHTASD, SEPARAR, QWEN, SIGLIP];
++
++/// Los modelos que se bajan con la app `app_id`.
++pub fn de(app_id: &str) -> &'static [Modelo] {
++    match app_id {
++        "filmcraft" => FILMNEX,
++        _ => &[],
++    }
++}
++
++/// Lo que pesan todos los modelos de `app_id`.
++pub fn total(app_id: &str) -> u64 {
++    de(app_id).iter().map(Modelo::tamano).fold(0, u64::saturating_add)
++}
++
++/// Un nombre seguro: partes no vacías, sin `.`/`..`, sin `\`, `:` ni rutas absolutas.
++pub fn nombre_valido(nombre: &str) -> bool {
++    !nombre.is_empty()
++        && nombre.len() <= 200
++        && !nombre.contains(['\\', ':'])
++        && nombre.split('/').all(|p| !p.is_empty() && p != "." && p != ".." && p.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn every_model_is_pinned_checked_and_safe() {
++        let mut carpetas = Vec::new();
++        for m in FILMNEX {
++            assert!(m.base.starts_with("https://"), "{}", m.carpeta);
++            assert!(!m.base.contains("/main") && !m.base.contains("/master"), "{} must be pinned", m.carpeta);
++            assert!(nombre_valido(m.carpeta) && !m.carpeta.contains('/'), "{}", m.carpeta);
++            assert!(!carpetas.contains(&m.carpeta), "{} twice", m.carpeta);
++            carpetas.push(m.carpeta);
++            assert!(!m.licencia.is_empty());
++            assert!(!m.archivos.is_empty());
++            for a in m.archivos {
++                assert!(nombre_valido(a.nombre), "{}", a.nombre);
++                assert!(a.sha256.len() == 64 && a.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{}", a.nombre);
++                assert!(a.tamano > 0);
++            }
++        }
++    }
++
++    #[test]
++    fn only_filmnex_brings_models() {
++        assert_eq!(de("photocraft"), &[] as &[Modelo]);
++        assert_eq!(WHISPER.tamano(), 1_620_540_229);
++        let carpetas: Vec<_> = de("filmcraft").iter().map(|m| m.carpeta).collect();
++        assert_eq!(
++            carpetas,
++            [
++                "whisper-large-v3-turbo",
++                "reframe-yunet-2023mar",
++                "reframe-rtdetrv2-r18vd",
++                "reframe-lightasd-ava",
++                "separar-kim-vocal-2",
++                "qwen3-embedding-0.6b",
++                "siglip2-base-patch16-256"
++            ]
++        );
++        // unos 4,9 GB en total
++        assert_eq!(total("filmcraft"), 4_901_378_200);
++        assert_eq!(
++            WHISPER.url(&WHISPER.archivos[0]),
++            "https://huggingface.co/openai/whisper-large-v3-turbo/resolve/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/config.json"
++        );
++    }
++
++    #[test]
++    fn unsafe_names_are_refused() {
++        for malo in ["", "../x", "a/../b", "/abs", "c:x", "a\\b", "a//b", ".", "a/./b", "ñ.bin"] {
++            assert!(!nombre_valido(malo), "{malo}");
++        }
++        assert!(nombre_valido("onnx/model.safetensors"));
++    }
++}
+diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs
+index a0a67ef..d110d14 100644
+--- a/crates/core/src/lib.rs
++++ b/crates/core/src/lib.rs
+@@ -13,6 +13,7 @@ pub mod details;
+ pub mod distro;
+ pub mod feed;
+ pub mod hosted_catalog;
++pub mod jacnex_modelos;
+ pub mod platform;
+ pub mod protocol;
+ pub mod release;
+diff --git a/crates/native/src/install.rs b/crates/native/src/install.rs
+index 818023e..a10ec8f 100644
+--- a/crates/native/src/install.rs
++++ b/crates/native/src/install.rs
+@@ -196,6 +196,8 @@ pub fn install_at(
+         }
+         Some(Downgrade::KeepOldCopy) | None => None,
+     };
++    // Jacnex: Filmnex trae sus modelos de IA, que se bajan antes (una sola vez; ver jacnex_modelos).
++    crate::jacnex_modelos::preparar(app, job.http, job.paths, job.stop, &mut *job.phase)?;
+     #[cfg_attr(not(windows), allow(unused_variables))]
+     let (file, sha256) = download(release, asset, job)?;
+     log::info!("{}: download ready ({}), running installer...", app.name, file.display());
+@@ -803,7 +805,7 @@ pub fn uninstall(
+     {
+         return Err(format!("{} is running. Quit it, then try again.", app.name));
+     }
+-    match installed.source {
++    let quitado = match installed.source {
+         #[cfg(windows)]
+         InstallSource::Launcher if record.is_some_and(|r| r.kind == PackageKind::PortableZip) => {
+             crate::portable::remove(app, record.ok_or("the launcher has no record of these files")?).inspect(|()| crate::jacnex_accesos::borrar(app))
+@@ -830,7 +832,12 @@ pub fn uninstall(
+         #[cfg(target_os = "linux")]
+         InstallSource::Launcher => remove_appimage(app, &path, record),
+         other => Err(format!("{} can't be removed from here", other.label())),
++    };
++    // Jacnex: sin la app, sus modelos de IA ya no hacen falta.
++    if quitado.is_ok() {
++        crate::jacnex_modelos::borrar(app, paths);
+     }
++    quitado
+ }
+ 
+ /// Deletes an AppImage, the menu entry and icon the launcher wrote for it, and the menu entry
+diff --git a/crates/native/src/jacnex_modelos.rs b/crates/native/src/jacnex_modelos.rs
+new file mode 100644
+index 0000000..fb04af8
+--- /dev/null
++++ b/crates/native/src/jacnex_modelos.rs
+@@ -0,0 +1,214 @@
++//! Jacnex: los modelos de IA de una app (hoy, los de Filmnex: voz, vertical, búsqueda) se
++//! descargan junto con ella, antes de instalarla o actualizarla, para que la app nunca pida una
++//! descarga. La lista (URL fija, SHA-256 y tamaño de cada archivo) está en
++//! `jacnex_studio_core::jacnex_modelos`.
++//!
++//! Quedan en `<datos de Jacnex Studio>/modelos/<carpeta>/` (en Windows,
++//! `%LOCALAPPDATA%\Jacnex Studio\modelos\…`), fuera de la carpeta de la app: una actualización
++//! no los vuelve a bajar. Cada archivo se comprueba con su SHA-256; si la conexión se corta, la
++//! descarga sigue desde donde quedó.
++
++use std::path::{Path, PathBuf};
++
++use jacnex_studio_core::CraftApp;
++use jacnex_studio_core::jacnex_modelos::{self as datos, nombre_valido};
++use jacnex_studio_core::protocol::JobPhase;
++
++use crate::http::{Http, Stop, Transfer};
++use crate::paths::Paths;
++
++/// Un archivo por bajar.
++#[derive(Clone, Debug)]
++pub struct Archivo {
++    pub url: String,
++    /// La ruta dentro de la carpeta de modelos (`<carpeta>/<nombre>`), con `/`.
++    pub ruta: String,
++    pub sha256: String,
++    pub tamano: u64,
++}
++
++/// Los archivos de los modelos de `app_id`, con nombres seguros.
++pub fn archivos(app_id: &str) -> Vec<Archivo> {
++    datos::de(app_id)
++        .iter()
++        .filter(|m| nombre_valido(m.carpeta) && !m.carpeta.contains('/'))
++        .flat_map(|m| {
++            m.archivos.iter().filter(|a| nombre_valido(a.nombre)).map(move |a| Archivo {
++                url: m.url(a),
++                ruta: format!("{}/{}", m.carpeta, a.nombre),
++                sha256: a.sha256.into(),
++                tamano: a.tamano,
++            })
++        })
++        .collect()
++}
++
++/// La carpeta de todos los modelos.
++pub fn carpeta(paths: &Paths) -> PathBuf {
++    paths.data.join("modelos")
++}
++
++fn ruta(dir: &Path, a: &Archivo) -> PathBuf {
++    a.ruta.split('/').fold(dir.to_path_buf(), |p, parte| p.join(parte))
++}
++
++/// El archivo ya está completo (el tamaño basta aquí: la app comprueba el SHA-256 al cargarlo, y
++/// cada descarga se comprobó al terminar).
++fn listo(dir: &Path, a: &Archivo) -> bool {
++    std::fs::metadata(ruta(dir, a)).is_ok_and(|m| m.is_file() && m.len() == a.tamano)
++}
++
++/// Bytes que faltan bajar.
++pub fn faltan(dir: &Path, lista: &[Archivo]) -> u64 {
++    lista.iter().filter(|a| !listo(dir, a)).map(|a| a.tamano).fold(0, u64::saturating_add)
++}
++
++/// Antes de instalar o actualizar `app`: baja lo que falte de sus modelos. Una pausa o una
++/// cancelación terminan el trabajo como cualquier descarga (y nada se instala).
++pub fn preparar(app: &CraftApp, http: &Http, paths: &Paths, stop: &Stop, phase: &mut dyn FnMut(JobPhase)) -> Result<(), String> {
++    let lista = archivos(app.id);
++    if lista.is_empty() {
++        return Ok(());
++    }
++    bajar(&carpeta(paths), &lista, http, stop, phase)
++}
++
++/// Baja a `dir` los archivos de `lista` que falten, con el progreso de todos juntos.
++pub fn bajar(dir: &Path, lista: &[Archivo], http: &Http, stop: &Stop, phase: &mut dyn FnMut(JobPhase)) -> Result<(), String> {
++    let total = faltan(dir, lista);
++    if total == 0 {
++        return Ok(());
++    }
++    log::info!("descargando los modelos de IA ({total} bytes)");
++    let mut hecho = 0u64;
++    for a in lista {
++        if listo(dir, a) {
++            continue;
++        }
++        let destino = ruta(dir, a);
++        if let Some(padre) = destino.parent() {
++            std::fs::create_dir_all(padre).map_err(|e| format!("the AI models couldn't be saved: {e}"))?;
++        }
++        let base = hecho;
++        http.download(&a.url, &destino, a.tamano, &a.sha256, stop, &mut |t| match t {
++            Transfer::Bytes { done, .. } => phase(JobPhase::Downloading { done: base.saturating_add(done).min(total), total }),
++            Transfer::Reconnecting { done, .. } => phase(JobPhase::Reconnecting { done: base.saturating_add(done).min(total), total }),
++        })
++        .map_err(|e| {
++            if e == jacnex_studio_core::protocol::CANCELLED || e == jacnex_studio_core::protocol::PAUSED {
++                e
++            } else {
++                format!("the AI models couldn't be downloaded: {e}")
++            }
++        })?;
++        hecho = hecho.saturating_add(a.tamano);
++    }
++    (phase)(JobPhase::Verifying);
++    Ok(())
++}
++
++/// Al quitar `app`: borra sus modelos (solo sus archivos, por nombre, y las carpetas que queden
++/// vacías).
++pub fn borrar(app: &CraftApp, paths: &Paths) {
++    let dir = carpeta(paths);
++    for a in archivos(app.id) {
++        let archivo = ruta(&dir, &a);
++        let _ = std::fs::remove_file(&archivo);
++        // las carpetas de este archivo, de adentro hacia afuera, hasta la de modelos
++        let mut p = archivo.parent().map(Path::to_path_buf);
++        while let Some(c) = p {
++            if c == dir || !c.starts_with(&dir) || std::fs::remove_dir(&c).is_err() {
++                break;
++            }
++            p = c.parent().map(Path::to_path_buf);
++        }
++    }
++    let _ = std::fs::remove_dir(&dir);
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::http::tests::{Reply, body, serve};
++
++    fn de_prueba(ruta: &str, veces: usize) -> (Archivo, Vec<u8>) {
++        let (cuerpo, sha) = body();
++        let (url, _) = serve(cuerpo.clone(), vec![Reply::Full; veces]);
++        (Archivo { url, ruta: ruta.into(), sha256: sha, tamano: cuerpo.len() as u64 }, cuerpo)
++    }
++
++    #[test]
++    fn the_models_are_pinned_and_live_outside_the_app_folder() {
++        let lista = archivos("filmcraft");
++        assert!(lista.iter().any(|a| a.ruta == "whisper-large-v3-turbo/model.safetensors"));
++        assert!(lista.iter().all(|a| a.url.starts_with("https://") && a.sha256.len() == 64));
++        assert_eq!(faltan(Path::new("no-existe"), &lista), datos::total("filmcraft"));
++        let paths = Paths::under(Path::new("raiz"));
++        assert_eq!(carpeta(&paths), Path::new("raiz").join("data").join("modelos"));
++    }
++
++    #[test]
++    fn only_filmnex_downloads_models() {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = Paths::under(dir.path());
++        let app = CraftApp::by_id("photocraft").unwrap();
++        let mut fases = Vec::new();
++        preparar(app, &Http::new().unwrap(), &paths, &Stop::default(), &mut |p| fases.push(p)).unwrap();
++        assert!(fases.is_empty());
++        assert!(!carpeta(&paths).exists());
++    }
++
++    #[test]
++    fn missing_files_are_downloaded_checked_and_kept() {
++        let dir = tempfile::tempdir().unwrap();
++        let modelos = dir.path().join("modelos");
++        let (a, cuerpo_a) = de_prueba("voz/config.json", 1);
++        let (b, cuerpo_b) = de_prueba("vision/sub/model.safetensors", 1);
++        let lista = vec![a, b];
++        let http = Http::new().unwrap();
++        let mut fases = Vec::new();
++        bajar(&modelos, &lista, &http, &Stop::default(), &mut |p| fases.push(p)).unwrap();
++        assert_eq!(std::fs::read(modelos.join("voz").join("config.json")).unwrap(), cuerpo_a);
++        assert_eq!(std::fs::read(modelos.join("vision").join("sub").join("model.safetensors")).unwrap(), cuerpo_b);
++        let total = (cuerpo_a.len() + cuerpo_b.len()) as u64;
++        assert!(fases.contains(&JobPhase::Downloading { done: total, total }), "{fases:?}");
++        assert_eq!(fases.last(), Some(&JobPhase::Verifying));
++        assert_eq!(faltan(&modelos, &lista), 0);
++        // la segunda vez no se baja nada
++        let mut otra = Vec::new();
++        bajar(&modelos, &lista, &http, &Stop::default(), &mut |p| otra.push(p)).unwrap();
++        assert!(otra.is_empty());
++    }
++
++    #[test]
++    fn a_file_with_the_wrong_checksum_is_refused() {
++        let dir = tempfile::tempdir().unwrap();
++        // la descarga se reintenta una vez desde cero antes de rechazarla
++        let (mut a, _) = de_prueba("voz/config.json", 2);
++        a.sha256 = "0".repeat(64);
++        let r = bajar(dir.path(), &[a], &Http::new().unwrap(), &Stop::default(), &mut |_| {});
++        assert!(r.is_err_and(|e| e.contains("AI models")));
++        assert!(!dir.path().join("voz").join("config.json").exists());
++    }
++
++    #[test]
++    fn removing_filmnex_deletes_only_its_model_files() {
++        let dir = tempfile::tempdir().unwrap();
++        let paths = Paths::under(dir.path());
++        let modelos = carpeta(&paths);
++        let voz = modelos.join("whisper-large-v3-turbo");
++        std::fs::create_dir_all(&voz).unwrap();
++        std::fs::write(voz.join("config.json"), b"{}").unwrap();
++        borrar(CraftApp::by_id("photocraft").unwrap(), &paths);
++        assert!(voz.join("config.json").exists());
++        let otro = modelos.join("otro.bin");
++        std::fs::write(&otro, b"x").unwrap();
++        borrar(CraftApp::by_id("filmcraft").unwrap(), &paths);
++        assert!(!voz.exists());
++        assert!(otro.exists(), "a file the launcher didn't put there stays");
++        std::fs::remove_file(&otro).unwrap();
++        std::fs::create_dir_all(&voz).unwrap();
++        borrar(CraftApp::by_id("filmcraft").unwrap(), &paths);
++        assert!(!modelos.exists(), "empty folders go too");
++    }
++}
+diff --git a/crates/native/src/lib.rs b/crates/native/src/lib.rs
+index 04b28d0..8541838 100644
+--- a/crates/native/src/lib.rs
++++ b/crates/native/src/lib.rs
+@@ -17,6 +17,7 @@ pub mod install;
+ #[cfg(windows)]
+ mod jacnex_accesos;
+ pub mod jacnex_cuenta;
++pub mod jacnex_modelos;
+ pub mod login;
+ pub mod manifest;
+ #[cfg(any(windows, test))]
+diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
+index be43154..41a171e 100644
+--- a/crates/ui-egui/src/jacnex.rs
++++ b/crates/ui-egui/src/jacnex.rs
+@@ -595,7 +595,9 @@ impl LauncherUi {
+     fn jx_tamano(&self, entry: &AppEntry) -> Option<u64> {
+         let (r, p) = (entry.release()?, self.platform?);
+         let stems: Vec<&str> = entry.app.stems().collect();
+-        pick_asset(r, &stems, p, p.download_kinds()).map(|(a, _)| a.size)
++        // Filmnex se instala con sus modelos de IA (jacnex_modelos, en el backend).
++        let extra = jacnex_studio_core::jacnex_modelos::total(entry.app.id);
++        pick_asset(r, &stems, p, p.download_kinds()).map(|(a, _)| a.size.saturating_add(extra))
+     }
+ 
+     fn jx_tarjeta(&self, ui: &mut Ui, rect: Rect, f: &Ficha, color: Color32) {

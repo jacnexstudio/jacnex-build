@@ -1014,10 +1014,10 @@ index e9bc8a2..be43154 100644
 +}
 diff --git a/crates/ui-egui/src/jacnex/acceso.rs b/crates/ui-egui/src/jacnex/acceso.rs
 new file mode 100644
-index 0000000..ace5d16
+index 0000000..23fa238
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex/acceso.rs
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,536 @@
 +//! The Jacnex account (Forgenex's: the same credits and plan). Until someone signs in the window
 +//! shows only the sign-in screen, with an email and password form and a button that signs in on
 +//! the web; afterwards the header carries the account's menu. The desktop does the network calls
@@ -1050,6 +1050,9 @@ index 0000000..ace5d16
 +const ID_ABIERTO: &str = "jx-cuenta-abierto";
 +const ID_LEIDA: &str = "jx-cuenta-leida";
 +const ID_FOCO: &str = "jx-cuenta-foco";
++const ID_VER_CLAVE: &str = "jx-cuenta-ver-clave";
++/// The browser sign-in was started with "Continuar con Google".
++const ID_GOOGLE: &str = "jx-cuenta-google";
 +
 +fn id(nombre: &str) -> egui::Id {
 +    egui::Id::unique(nombre)
@@ -1167,7 +1170,7 @@ index 0000000..ace5d16
 +    ui.add_space(14.0);
 +    etiqueta(ui, t, "Contraseña");
 +    let id_campo_clave = id(ID_CLAVE).with("campo");
-+    let r_clave = campo(ui, t, id_campo_clave, &mut clave, true, "Tu contraseña", !entrando);
++    let r_clave = campo_clave(ui, t, id_campo_clave, &mut clave, !entrando);
 +    let enter = |r: &egui::Response| r.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 +    let mut enviar = enter(&r_clave);
 +    if enter(&r_correo) {
@@ -1215,9 +1218,18 @@ index 0000000..ace5d16
 +    ui.add_space(16.0);
 +    separador_o(ui, t);
 +    ui.add_space(16.0);
++    // Google goes through the same browser sign-in: /conectar?…&google=1 jumps straight to Google.
++    let google = ui.add_enabled_ui(!entrando, |ui| boton_google(ui, t)).inner;
++    if google.on_hover_text("Se abre tu navegador: elige tu cuenta de Google y vuelves conectado").clicked() {
++        aviso = None;
++        ctx.data_mut(|d| d.insert_temp(id(ID_GOOGLE), true));
++        cuenta.enviar(OrdenCuenta::ConNavegador { registro: false });
++    }
++    ui.add_space(10.0);
 +    let navegador = ui.add_enabled_ui(!entrando, |ui| boton(ui, t, "Entrar con el navegador", false)).inner;
 +    if navegador.on_hover_text("Se abre app.jacnex.store: inicia sesión allí y vuelves conectado").clicked() {
 +        aviso = None;
++        ctx.data_mut(|d| d.insert_temp(id(ID_GOOGLE), false));
 +        cuenta.enviar(OrdenCuenta::ConNavegador { registro: false });
 +    }
 +    ui.add_space(20.0);
@@ -1226,6 +1238,7 @@ index 0000000..ace5d16
 +        ui.label(RichText::new("¿No tienes cuenta?").font(FontId::new(13.5, theme::medium())).color(t.muted));
 +        if ui.add_enabled_ui(!entrando, |ui| enlace(ui, t, "Créala gratis")).inner.clicked() {
 +            aviso = None;
++            ctx.data_mut(|d| d.insert_temp(id(ID_GOOGLE), false));
 +            cuenta.enviar(OrdenCuenta::ConNavegador { registro: true });
 +        }
 +    });
@@ -1244,6 +1257,8 @@ index 0000000..ace5d16
 +/// Signing in on the web: the code to check there, and a way back.
 +fn esperando(ui: &mut Ui, t: &Tokens, cuenta: &mut dyn Cuenta, url: &str, codigo: &str) {
 +    let ctx = ui.ctx().clone();
++    let google: bool = ctx.data(|d| d.get_temp(id(ID_GOOGLE))).unwrap_or(false);
++    let url = &url_con_google(url, google);
 +    // The browser opens once for each code.
 +    let abierto: Option<String> = ctx.data(|d| d.get_temp(id(ID_ABIERTO)));
 +    if abierto.as_deref() != Some(codigo) {
@@ -1251,7 +1266,12 @@ index 0000000..ace5d16
 +        ctx.data_mut(|d| d.insert_temp(id(ID_ABIERTO), codigo.to_string()));
 +    }
 +
-+    titulo(ui, t, "Sigue en tu navegador", "Abrimos app.jacnex.store en tu navegador. Inicia sesión allí y confirma que aparece este código:");
++    let detalle = if google {
++        "Abrimos tu navegador. Elige tu cuenta de Google y confirma que aparece este código:"
++    } else {
++        "Abrimos app.jacnex.store en tu navegador. Inicia sesión allí y confirma que aparece este código:"
++    };
++    titulo(ui, t, "Sigue en tu navegador", detalle);
 +
 +    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
 +    ui.painter().rect(
@@ -1277,9 +1297,62 @@ index 0000000..ace5d16
 +    ui.add_space(16.0);
 +    ui.vertical_centered(|ui| {
 +        if enlace(ui, t, "Cancelar").clicked() {
++            ctx.data_mut(|d| d.insert_temp(id(ID_GOOGLE), false));
 +            cuenta.enviar(OrdenCuenta::Cancelar);
 +        }
 +    });
++}
++
++/// The sign-in page, told to go straight to Google.
++fn url_con_google(url: &str, google: bool) -> String {
++    if !google {
++        return url.to_string();
++    }
++    let union = if url.contains('?') { '&' } else { '?' };
++    format!("{url}{union}google=1")
++}
++
++/// "Continuar con Google": an outlined button with the Google "G".
++fn boton_google(ui: &mut Ui, t: &Tokens) -> egui::Response {
++    const TEXTO: &str = "Continuar con Google";
++    let sense = if ui.is_enabled() { Sense::click() } else { Sense::hover() };
++    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), BOTON_H), sense);
++    let hover = ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered() && ui.is_enabled(), 0.12);
++    let p = ui.painter();
++    p.rect(rect, CornerRadius::same(10), theme::tint(t.ink_strong, 0.05 * hover), Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
++    let tinta = if ui.is_enabled() { t.ink_strong } else { t.ink_strong.gamma_multiply(0.5) };
++    let galley = p.layout_no_wrap(TEXTO.into(), FontId::new(14.0, theme::bold()), tinta);
++    let (logo, hueco) = (18.0, 10.0);
++    let izquierda = rect.center().x - (logo + hueco + galley.size().x) / 2.0;
++    pintar_g(p, pos2(izquierda + logo / 2.0, rect.center().y), logo / 2.0, ui.is_enabled());
++    p.galley(pos2(izquierda + logo + hueco, rect.center().y - galley.size().y / 2.0), galley, tinta);
++    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), TEXTO));
++    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
++}
++
++/// The four-colour Google "G", drawn as arcs (angles in degrees, clockwise from the right).
++fn pintar_g(p: &egui::Painter, c: egui::Pos2, radio: f32, activo: bool) {
++    const AZUL_G: Color32 = Color32::from_rgb(0x42, 0x85, 0xF4);
++    const VERDE_G: Color32 = Color32::from_rgb(0x34, 0xA8, 0x53);
++    const AMARILLO_G: Color32 = Color32::from_rgb(0xFB, 0xBC, 0x05);
++    const ROJO_G: Color32 = Color32::from_rgb(0xEA, 0x43, 0x35);
++    let grosor = radio * 0.42;
++    let r = radio - grosor / 2.0;
++    let color = |c: Color32| if activo { c } else { c.gamma_multiply(0.5) };
++    for (desde, hasta, tono) in [(0.0_f32, 50.0_f32, AZUL_G), (45.0, 140.0, VERDE_G), (135.0, 222.0, AMARILLO_G), (218.0, 318.0, ROJO_G)] {
++        let pasos = 12;
++        let puntos = (0..=pasos)
++            .map(|i| {
++                #[allow(clippy::cast_precision_loss)]
++                let a = (desde + (hasta - desde) * i as f32 / pasos as f32).to_radians();
++                pos2(c.x + r * a.cos(), c.y + r * a.sin())
++            })
++            .collect::<Vec<_>>();
++        p.add(egui::Shape::line(puntos, Stroke::new(grosor, color(tono))));
++    }
++    // The bar of the G.
++    let barra = Rect::from_min_max(pos2(c.x - 0.5, c.y - grosor / 2.0), pos2(c.x + radio, c.y + grosor / 2.0));
++    p.rect_filled(barra, CornerRadius::ZERO, color(AZUL_G));
 +}
 +
 +fn etiqueta(ui: &mut Ui, t: &Tokens, texto: &str) {
@@ -1288,11 +1361,71 @@ index 0000000..ace5d16
 +}
 +
 +fn campo(ui: &mut Ui, t: &Tokens, id: egui::Id, texto: &mut String, clave: bool, pista: &str, activo: bool) -> egui::Response {
++    campo_con_margen(ui, t, id, texto, clave, pista, activo, Margin::symmetric(12, 11))
++}
++
++/// The password field, with an eye on its right that shows or hides what was typed.
++fn campo_clave(ui: &mut Ui, t: &Tokens, id: egui::Id, texto: &mut String, activo: bool) -> egui::Response {
++    let ctx = ui.ctx().clone();
++    let mut ver: bool = ctx.data(|d| d.get_temp(egui::Id::unique(ID_VER_CLAVE))).unwrap_or(false);
++    let margen = Margin { left: 12, right: 44, top: 11, bottom: 11 };
++    let r = campo_con_margen(ui, t, id, texto, !ver, "Tu contraseña", activo, margen);
++    let ojo = Rect::from_center_size(pos2(r.rect.right() - 22.0, r.rect.center().y), vec2(32.0, 32.0));
++    let sentido = if activo { Sense::click() } else { Sense::hover() };
++    let boton = ui.interact(ojo, id.with("ver"), sentido);
++    let ayuda = if ver { "Ocultar la contraseña" } else { "Mostrar la contraseña" };
++    boton.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, activo, ayuda));
++    if boton.hovered() && activo {
++        ui.painter().rect_filled(ojo.shrink(2.0), CornerRadius::same(8), theme::tint(t.ink_strong, 0.06));
++    }
++    let color = if !activo {
++        t.faint
++    } else if boton.hovered() {
++        t.ink_strong
++    } else {
++        t.muted
++    };
++    pintar_ojo(ui.painter(), ojo.center(), color, !ver);
++    let boton = boton.on_hover_text(ayuda).on_hover_cursor(egui::CursorIcon::PointingHand);
++    if boton.clicked() {
++        ver = !ver;
++        // Keep typing where you were.
++        ctx.memory_mut(|m| m.request_focus(id));
++        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(ID_VER_CLAVE), ver));
++    }
++    r
++}
++
++/// An eye (an almond and its pupil) centred on `c`; `tachado` crosses it out.
++fn pintar_ojo(p: &egui::Painter, c: egui::Pos2, color: Color32, tachado: bool) {
++    let (ancho, alto) = (8.5_f32, 5.2_f32);
++    let pasos = 16;
++    let mut puntos = Vec::with_capacity(2 * pasos + 2);
++    for i in 0..=pasos {
++        #[allow(clippy::cast_precision_loss)]
++        let x = -1.0 + 2.0 * i as f32 / pasos as f32;
++        puntos.push(pos2(c.x + x * ancho, c.y - alto * (1.0 - x * x)));
++    }
++    for i in (0..=pasos).rev() {
++        #[allow(clippy::cast_precision_loss)]
++        let x = -1.0 + 2.0 * i as f32 / pasos as f32;
++        puntos.push(pos2(c.x + x * ancho, c.y + alto * (1.0 - x * x)));
++    }
++    let trazo = Stroke::new(1.5, color);
++    p.add(egui::Shape::closed_line(puntos, trazo));
++    p.circle_stroke(c, 2.4, trazo);
++    if tachado {
++        p.line_segment([pos2(c.x - 7.0, c.y + 6.5), pos2(c.x + 7.0, c.y - 6.5)], Stroke::new(1.6, color));
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++fn campo_con_margen(ui: &mut Ui, t: &Tokens, id: egui::Id, texto: &mut String, clave: bool, pista: &str, activo: bool, margen: Margin) -> egui::Response {
 +    let edit = egui::TextEdit::singleline(texto)
 +        .id(id)
 +        .password(clave)
 +        .desired_width(f32::INFINITY)
-+        .margin(Margin::symmetric(12, 11))
++        .margin(margen)
 +        .char_limit(256)
 +        .font(FontId::new(14.5, theme::medium()))
 +        .text_color(t.ink_strong)
@@ -1404,13 +1537,21 @@ index 0000000..ace5d16
 +
 +#[cfg(test)]
 +mod tests {
-+    use super::creditos;
++    use super::{creditos, url_con_google};
 +
 +    #[test]
 +    fn creditos_en_singular_y_plural() {
 +        assert_eq!(creditos(1), "1 crédito");
 +        assert_eq!(creditos(0), "0 créditos");
 +        assert_eq!(creditos(3200), "3,200 créditos");
++    }
++
++    #[test]
++    fn google_va_directo_desde_conectar() {
++        let url = "https://app.jacnex.store/conectar?c=ABCD-EFGH";
++        assert_eq!(url_con_google(url, false), url);
++        assert_eq!(url_con_google(url, true), "https://app.jacnex.store/conectar?c=ABCD-EFGH&google=1");
++        assert_eq!(url_con_google("https://app.jacnex.store/conectar", true), "https://app.jacnex.store/conectar?google=1");
 +    }
 +}
 diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
