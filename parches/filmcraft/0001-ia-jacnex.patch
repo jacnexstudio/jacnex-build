@@ -753,6 +753,74 @@ index 1f17a36..d891226 100644
  filmcraft-tts = { path = "crates/tts" }
  filmcraft-tts-text = { path = "crates/tts-text" }
  filmcraft-render = { path = "crates/render" }
+diff --git a/apps/filmcraft/src/args.rs b/apps/filmcraft/src/args.rs
+index ca72b01..2664577 100644
+--- a/apps/filmcraft/src/args.rs
++++ b/apps/filmcraft/src/args.rs
+@@ -67,7 +67,8 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
+         control_port: None,
+         control_input_only: false,
+         files: Vec::new(),
+-        demo: true,
++        // Jacnex: Filmnex starts with a clean project; only `--demo` opens the demo.
++        demo: false,
+         startup_flag: false,
+         recover: None,
+         data_dir: None,
+@@ -232,7 +233,7 @@ mod tests {
+                 control_port: None,
+                 control_input_only: false,
+                 files: vec![],
+-                demo: true,
++                demo: false,
+                 startup_flag: false,
+                 recover: None,
+                 data_dir: None,
+diff --git a/apps/filmcraft/src/main.rs b/apps/filmcraft/src/main.rs
+index 55e4303..faa157e 100644
+--- a/apps/filmcraft/src/main.rs
++++ b/apps/filmcraft/src/main.rs
+@@ -4,8 +4,8 @@
+ //! [project.fcproj | media files…]`; `--help` prints the options, `--version` the version. An
+ //! unknown option is an error (exit code 2), not a file to open.
+ //!
+-//! Without a project, `--demo` or `--empty`, Settings ▸ General ▸ At Startup decides: Show Home
+-//! (the demo project), Open Most Recent, or an empty project.
++//! Without a project, `--demo` or `--empty`, Settings ▸ General ▸ At Startup decides: Open Most
++//! Recent, or (Show Home, Start with an Empty Project) a clean, empty project.
+ //!
+ //! `--control <port>` (or `FILMCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
+ //! `FILMCRAFT_CONTROL_TOKEN` is required (see `docs/control-protocol.md`).
+@@ -348,15 +348,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
+         } else if !startup_flag && session.prefs.general.at_startup == "openMostRecent" {
+             // Settings ▸ General ▸ At Startup ▸ Open Most Recent
+             let recent = session.prefs.general.recent_projects.iter().find(|p| std::path::Path::new(p).exists()).cloned();
+-            match recent {
+-                Some(p) => {
+-                    if let Err(e) = session.execute("file.open", json!({"path": p})) {
+-                        log::error!("{e}");
+-                    }
+-                }
+-                None => {
+-                    let _ = session.execute("file.openDemoProject", json!({}));
+-                }
++            // none left: a clean, empty project
++            if let Some(p) = recent
++                && let Err(e) = session.execute("file.open", json!({"path": p}))
++            {
++                log::error!("{e}");
+             }
+         } else if !startup_flag && session.prefs.general.at_startup == "emptyProject" {
+         } else if demo {
+@@ -373,7 +369,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
+             }
+         }
+         let mut app = FilmcraftApp::new(session);
+-        app.set_startup_update_check(true);
++        // Jacnex: updates and notices go only through the Jacnex Studio launcher.
+         app.graphics_notice = notice;
+         if recover == Some(false) {
+             app.dialog = None;
 diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
 index 818075c..826e8e4 100644
 --- a/crates/engine/Cargo.toml
@@ -5142,6 +5210,28 @@ index 0000000..6f7bba1
 +        assert!(separate_voice(&x, rate, 2, &stopped, &mut |_| {}).is_err(), "a stop is an error");
 +    }
 +}
+diff --git a/crates/engine/src/settings/prefs.rs b/crates/engine/src/settings/prefs.rs
+index 78d3e74..2393392 100644
+--- a/crates/engine/src/settings/prefs.rs
++++ b/crates/engine/src/settings/prefs.rs
+@@ -11,7 +11,7 @@ pub struct GeneralPrefs {
+     /// `zh-cn`, `de`, `ru`, `fr`, `id`, `it`, `ko`, `cs`, `pl`, `sv`, `tr`, or `system` (the default: the operating system's preferred language when the
+     /// interface has it, otherwise English).
+     pub interface_language: String,
+-    /// "At Startup": `showHome` (Filmnex: the demo project), `openMostRecent`, `emptyProject`.
++    /// "At Startup": `showHome` (Filmnex: an empty project, like `emptyProject`), `openMostRecent`, `emptyProject`.
+     pub at_startup: String,
+     /// "When Opening a Project": `showOpenDialog` | `showHome`.
+     pub when_opening_project: String,
+@@ -38,7 +38,7 @@ impl Default for GeneralPrefs {
+     fn default() -> Self {
+         Self {
+             interface_language: "system".into(),
+-            at_startup: "showHome".into(),
++            at_startup: "emptyProject".into(),
+             when_opening_project: "showOpenDialog".into(),
+             bins_double_click: "openInPlace".into(),
+             bins_cmd_double_click: "openNewTab".into(),
 diff --git a/crates/engine/src/settings/schema.rs b/crates/engine/src/settings/schema.rs
 index 6e466de..bd1bc1d 100644
 --- a/crates/engine/src/settings/schema.rs
@@ -13569,6 +13659,20 @@ index ee1d813..167c59f 100644
      #[test]
      fn installed_checks_sizes() {
          let dir = std::env::temp_dir().join(format!("filmcraft-speech-models-{}", std::process::id()));
+diff --git a/crates/speech/src/whisper/tokenizer.rs b/crates/speech/src/whisper/tokenizer.rs
+index e9eba33..c55c474 100644
+--- a/crates/speech/src/whisper/tokenizer.rs
++++ b/crates/speech/src/whisper/tokenizer.rs
+@@ -42,7 +42,8 @@ fn unicode_to_byte() -> HashMap<char, u8> {
+             n += 1;
+         }
+     }
+-    bs.iter().zip(&cs).map(|(&b, &c)| (char::from_u32(c).expect("valid"), b as u8)).collect()
++    // every code point here is below 0x200, so none is skipped
++    bs.iter().zip(&cs).filter_map(|(&b, &c)| Some((char::from_u32(c)?, u8::try_from(b).ok()?))).collect()
+ }
+ 
+ impl Tokenizer {
 diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
 index d164de0..8acf2a1 100644
 --- a/crates/ui-egui/Cargo.toml
@@ -13659,10 +13763,18 @@ index e194fb7..8e25f87 100644
  mod tests {
      #[test]
 diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
-index 4e7e29b..74b6998 100644
+index 4e7e29b..234bb52 100644
 --- a/crates/ui-egui/src/i18n/es.tsv
 +++ b/crates/ui-egui/src/i18n/es.tsv
-@@ -3755,3 +3755,6 @@
+@@ -180,6 +180,7 @@
+ 	Import Image Sequence…	Importar secuencia de imágenes…
+ 	Import from Media Browser	Importar desde el navegador de medios
+ 	Import…	Importar…
++	Import Media	Importar medios
+ 	Info	Información
+ 	Ingest Settings…	Ajustes de ingesta…
+ 	Insert	Insertar
+@@ -3755,3 +3756,6 @@
  	Toggle Color Grading Section	Alternar sección de gradación de color
  	Color Grading Section	Sección de gradación de color
  	Read Video Scopes	Leer medidores de vídeo
@@ -13671,10 +13783,10 @@ index 4e7e29b..74b6998 100644
 +	Generate videos with Jacnex AI	Genera videos con la IA de Jacnex
 diff --git a/crates/ui-egui/src/jacnex_buscar.rs b/crates/ui-egui/src/jacnex_buscar.rs
 new file mode 100644
-index 0000000..0419f8a
+index 0000000..674cc17
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_buscar.rs
-@@ -0,0 +1,871 @@
+@@ -0,0 +1,868 @@
 +//! Jacnex: buscar en el material (IA de Jacnex › Buscar).
 +//!
 +//! Se escribe lo que se busca («cuando habla del precio», «la toma de la playa») y sale una lista de
@@ -13965,7 +14077,7 @@ index 0000000..0419f8a
 +    });
 +    ui.add_space(8.0);
 +    titulo(ui, "Cómo buscar", t);
-+    let motores = ["En esta computadora".to_string(), "Con IA (créditos)".to_string()];
++    let motores = ["En tu PC".to_string(), "Con IA (créditos)".to_string()];
 +    if let Some(i) = segmentos(ui, &motores, usize::from(b.con_ia), t) {
 +        b.con_ia = i == 1;
 +        b.material = None;
@@ -14004,7 +14116,6 @@ index 0000000..0419f8a
 +    ui.label(RichText::new(format!("Palabras: listo · Significado: {} · Imagen: {}", marca(sig), marca(img))).small().color(t.text_dim));
 +    if !sig || !img {
 +        ui.label(RichText::new(search::MISSING).small().color(ROJO));
-+        ui.label(RichText::new("Mientras tanto se buscan las palabras y lo que haya instalado.").small().color(t.text_dim));
 +    }
 +}
 +
@@ -14118,12 +14229,10 @@ index 0000000..0419f8a
 +        });
 +    } else {
 +        let texto = if b.con_ia { "Preparar la búsqueda con IA" } else { "Buscar" };
-+        if !b.con_ia {
-+            ui.label(RichText::new("Se hace en esta computadora: no usa créditos.").small().strong().color(ACENTO_CLARO));
-+        } else {
++        if b.con_ia {
 +            ui.label(RichText::new("Antes de enviar verás cuánto cuesta.").small().color(t.text_dim));
++            ui.add_space(2.0);
 +        }
-+        ui.add_space(2.0);
 +        if boton_acento(ui, texto, egui::vec2(ancho, 36.0), d.falta.is_none()).clicked() {
 +            b.pendiente = Some(if b.con_ia { Pedido::Preparar } else { Pedido::Buscar });
 +        }
@@ -14744,10 +14853,10 @@ index 0000000..188bb1a
 +}
 diff --git a/crates/ui-egui/src/jacnex_corta.rs b/crates/ui-egui/src/jacnex_corta.rs
 new file mode 100644
-index 0000000..cbd7db4
+index 0000000..282ac9d
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_corta.rs
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,475 @@
 +//! Jacnex: «Versión corta» (IA de Jacnex › Editar › Versión corta).
 +//!
 +//! De un video largo (una entrevista, un podcast, una charla) hace una versión de 15, 30, 60 o
@@ -14966,7 +15075,6 @@ index 0000000..cbd7db4
 +            c.material = None;
 +        }
 +    });
-+    ui.label(RichText::new("La IA lee lo que se dice (no ve la imagen): sirve para entrevistas, podcasts y charlas.").small().color(t.text_dim));
 +    ui.add_space(6.0);
 +}
 +
@@ -14987,7 +15095,6 @@ index 0000000..cbd7db4
 +    } else if let Some((bytes, Despues::Corta)) = ed.pide_descarga {
 +        let mb = bytes.div_ceil(MB).max(1);
 +        ui.label(RichText::new(format!("La primera vez se descarga el modelo de voz (unos {mb} MB).")).strong());
-+        ui.label(RichText::new("Queda en esta computadora: las siguientes veces no se descarga de nuevo.").small().color(t.text_dim));
 +        ui.add_space(4.0);
 +        ui.horizontal(|ui| {
 +            if boton_acento(ui, &format!("Descargar {mb} MB y seguir"), egui::vec2(ancho - 90.0, 32.0), true).clicked() {
@@ -15036,9 +15143,7 @@ index 0000000..cbd7db4
 +        if ed.en_nube()
 +            && let Some(n) = d.transcribir
 +        {
-+            ui.label(RichText::new(format!("Transcribir con Nemotron cuesta {} (0,3 por minuto).", creditos(n))).small().strong().color(ACENTO_CLARO));
-+        } else if !ed.en_nube() {
-+            ui.label(RichText::new("Transcribir se hace en esta computadora, sin créditos.").small().color(t.text_dim));
++            ui.label(RichText::new(format!("Transcribir cuesta {}.", creditos(n))).small().strong().color(ACENTO_CLARO));
 +        }
 +        ui.label(RichText::new("Antes de enviar verás cuánto cuesta la versión corta.").small().color(t.text_dim));
 +        ui.add_space(2.0);
@@ -15467,10 +15572,10 @@ index 0000000..2e0fe76
 +}
 diff --git a/crates/ui-egui/src/jacnex_doblaje.rs b/crates/ui-egui/src/jacnex_doblaje.rs
 new file mode 100644
-index 0000000..bfb936b
+index 0000000..b1e7338
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_doblaje.rs
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,794 @@
 +//! Jacnex: Doblaje (IA de Jacnex › Audio › Doblaje).
 +//!
 +//! Dobla lo que se dice en el clip seleccionado (o en toda la secuencia) a otro idioma, con la misma
@@ -15871,19 +15976,9 @@ index 0000000..bfb936b
 +            "No hay voz para doblar en lo seleccionado.".to_string()
 +        }
 +    } else {
-+        format!(
-+            "Se doblan {} frases ({} letras, {}): el clip seleccionado o, si no hay, toda la secuencia.",
-+            datos.frases,
-+            datos.letras,
-+            minutos(datos.segundos)
-+        )
++        format!("{} frases · {} letras · {}", datos.frases, datos.letras, minutos(datos.segundos))
 +    };
 +    ui.label(RichText::new(resumen).small().color(t.text_dim));
-+    ui.label(
-+        RichText::new("Usa una voz natural del catálogo (no copia la voz de quien habla). Antes se separa la voz de la música y los efectos (en tu equipo). Lo traducido va en una pista nueva, la música y los efectos en otra, y el audio original queda en silencio sin borrarse.")
-+            .small()
-+            .color(t.text_dim),
-+    );
 +    ui.add_space(4.0);
 +}
 +
@@ -17426,10 +17521,10 @@ index 0000000..c8ab747
 +}
 diff --git a/crates/ui-egui/src/jacnex_ia.rs b/crates/ui-egui/src/jacnex_ia.rs
 new file mode 100644
-index 0000000..7841c1b
+index 0000000..38d203e
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_ia.rs
-@@ -0,0 +1,3603 @@
+@@ -0,0 +1,3781 @@
 +//! Jacnex: la IA integrada de Filmnex (Clip › IA de Jacnex…).
 +//!
 +//! Lo creado va directo a la línea de tiempo:
@@ -17507,6 +17602,18 @@ index 0000000..7841c1b
 +            Grupo::Mejorar => "Mejorar",
 +            Grupo::Editar => "Editar",
 +            Grupo::Buscar => "Buscar",
++        }
++    }
++
++    /// Jacnex: el ícono del grupo en la barra lateral.
++    fn icono(self) -> crate::icons::Icon {
++        use crate::icons::Icon;
++        match self {
++            Grupo::Video => Icon::Film,
++            Grupo::Audio => Icon::Audio,
++            Grupo::Mejorar => Icon::Sparkle,
++            Grupo::Editar => Icon::Razor,
++            Grupo::Buscar => Icon::Search,
 +        }
 +    }
 +
@@ -17633,29 +17740,46 @@ index 0000000..7841c1b
 +        }
 +    }
 +
++    /// Lo que hace la herramienta, en una línea.
 +    fn explicacion(self) -> &'static str {
 +        match self {
-+            Modo::Texto => "Describe una escena y la IA la filma. El clip se coloca en el cabezal.",
-+            Modo::Foto => "La foto cobra vida: el cuadro bajo el cabezal o una imagen que elijas.",
-+            Modo::Transicion => "Une dos clips: la IA crea el paso del último cuadro de uno al primero del siguiente, y se inserta en el corte.",
-+            Modo::Voz => "Escribe el texto y una voz natural lo lee. El audio se coloca en el cabezal, en una pista de audio libre.",
-+            Modo::Musica => "Describe la música: la IA crea 2 versiones. La primera va al cabezal y las dos quedan en el proyecto.",
-+            Modo::Efecto => "Describe el sonido (pasos, lluvia, aplausos…). Se coloca en el cabezal, en una pista de audio libre.",
-+            Modo::Doblaje => {
-+                "Traduce lo que se dice y lo vuelve a decir en otro idioma, al mismo tiempo que el original. Separa la voz de la música en tu equipo: la música queda en una pista, el doblaje en otra y la voz original se silencia."
-+            }
-+            Modo::Mejorar => "Sube la resolución del clip elegido y recupera detalle. El clip mejorado reemplaza al original en su lugar.",
-+            Modo::Subtitulos => "Transcribe lo que se dice y crea subtítulos animados, palabra por palabra, en una pista nueva encima de todo.",
-+            Modo::Silencios => "Quita las pausas largas entre frases y junta lo demás. Ctrl+Z lo deshace.",
-+            Modo::Muletillas => "Quita «eh», «em», «mmm» y también «este», «o sea», «bueno» o «pues» cuando son de relleno (no cuando son parte de la frase).",
-+            Modo::PorTexto => "Transcribe la voz y abre el texto: borra palabras o frases y se cortan del video, como en un documento.",
-+            Modo::Vertical => "Crea una secuencia vertical nueva: la cámara sigue a quien habla. La original no se toca.",
-+            Modo::Corta => {
-+                "Deja lo mejor del video en 15, 30, 60 o 90 s: abre con un gancho y corta por frases. Crea una secuencia nueva; la original no se toca."
-+            }
-+            Modo::Buscar => {
-+                "Escribe lo que buscas («cuando habla del precio», «la toma de la playa»): se busca en todo el material, por lo que se dice y por lo que se ve."
-+            }
++            Modo::Texto => "Describe una escena y la IA la filma.",
++            Modo::Foto => "Da vida a una foto o al cuadro bajo el cabezal.",
++            Modo::Transicion => "Une dos clips con un paso creado por la IA.",
++            Modo::Voz => "Una voz natural lee tu texto.",
++            Modo::Musica => "Música a tu medida, en 2 versiones.",
++            Modo::Efecto => "Crea el sonido que describas.",
++            Modo::Doblaje => "Dobla la voz a otro idioma.",
++            Modo::Mejorar => "Sube la resolución del clip.",
++            Modo::Subtitulos => "Subtítulos animados, palabra por palabra.",
++            Modo::Silencios => "Quita las pausas largas.",
++            Modo::Muletillas => "Quita «eh», «este», «o sea»…",
++            Modo::PorTexto => "Edita el video borrando texto.",
++            Modo::Vertical => "Pasa a 9:16 siguiendo a quien habla.",
++            Modo::Corta => "Lo mejor del video en pocos segundos.",
++            Modo::Buscar => "Encuentra momentos por lo que se dice o se ve.",
++        }
++    }
++
++    /// Jacnex: el ícono de la herramienta (barra lateral y cabecera).
++    fn icono(self) -> crate::icons::Icon {
++        use crate::icons::Icon;
++        match self {
++            Modo::Texto => Icon::Type,
++            Modo::Foto => Icon::Image,
++            Modo::Transicion => Icon::Sequence,
++            Modo::Voz => Icon::Mic,
++            Modo::Musica => Icon::Audio,
++            Modo::Efecto => Icon::Fx,
++            Modo::Doblaje => Icon::Globe,
++            Modo::Mejorar => Icon::Star,
++            Modo::Subtitulos => Icon::Captions,
++            Modo::Silencios => Icon::Mute,
++            Modo::Muletillas => Icon::Chat,
++            Modo::PorTexto => Icon::ListView,
++            Modo::Vertical => Icon::Rectangle,
++            Modo::Corta => Icon::Stopwatch,
++            Modo::Buscar => Icon::Search,
 +        }
 +    }
 +
@@ -19624,7 +19748,9 @@ index 0000000..7841c1b
 +pub(crate) const ACENTO_CLARO: Color32 = Color32::from_rgb(205, 191, 255);
 +pub(crate) const ROJO: Color32 = Color32::from_rgb(230, 120, 90);
 +pub(crate) const VERDE: Color32 = Color32::from_rgb(110, 200, 140);
-+const ANCHO: f32 = 340.0;
++const ANCHO: f32 = 600.0;
++/// Jacnex: el ancho de la barra lateral (grupos y herramientas).
++const LADO: f32 = 164.0;
 +/// El ancho de las etiquetas de Ajustes.
 +const ETIQUETA: f32 = 86.0;
 +
@@ -19658,7 +19784,9 @@ index 0000000..7841c1b
 +
 +/// El botón principal, de color.
 +pub(crate) fn boton_acento(ui: &mut egui::Ui, texto: &str, tam: egui::Vec2, activo: bool) -> egui::Response {
-+    let b = egui::Button::new(RichText::new(texto).strong().color(Color32::WHITE)).fill(ACENTO).corner_radius(8.0).min_size(tam);
++    // Jacnex: el texto centrado (un relleno a cada lado)
++    let contenido = (egui::Atom::grow(), RichText::new(texto).strong().color(Color32::WHITE), egui::Atom::grow());
++    let b = egui::Button::new(contenido).fill(ACENTO).corner_radius(8.0).min_size(tam);
 +    ui.add_enabled(activo, b)
 +}
 +
@@ -19806,10 +19934,26 @@ index 0000000..7841c1b
 +            }
 +            ui.add_space(4.0);
 +            ui.separator();
-+            egui::ScrollArea::vertical().max_height(pantalla.height() * 0.6).auto_shrink([false, true]).show(ui, |ui| cuerpo(ui, e, &cx, &t, &mut pide));
-+            ui.separator();
-+            ui.add_space(4.0);
-+            pie(ui, e, &cx, &t, &mut pide);
++            // Jacnex: barra lateral con los grupos y sus herramientas; a la derecha, la elegida
++            ui.horizontal_top(|ui| {
++                egui::Frame::NONE.fill(Color32::from_black_alpha(40)).corner_radius(8.0).inner_margin(6).show(ui, |ui| {
++                    ui.set_width(LADO - 12.0);
++                    ui.vertical(|ui| lado(ui, e, &t));
++                });
++                ui.add_space(4.0);
++                ui.vertical(|ui| {
++                    ui.add_space(2.0);
++                    cabecera(ui, e.modo, &t);
++                    ui.add_space(6.0);
++                    egui::ScrollArea::vertical()
++                        .max_height(pantalla.height() * 0.6)
++                        .auto_shrink([false, true])
++                        .show(ui, |ui| cuerpo(ui, e, &cx, &t, &mut pide));
++                    ui.separator();
++                    ui.add_space(4.0);
++                    pie(ui, e, &cx, &t, &mut pide);
++                });
++            });
 +        });
 +    if pide.cerrar {
 +        app.jacnex_ia.abierta = false;
@@ -19832,32 +19976,187 @@ index 0000000..7841c1b
 +    }
 +}
 +
-+fn cuerpo(ui: &mut egui::Ui, e: &mut Estado, cx: &Contexto, t: &crate::theme::Tokens, pide: &mut Pedidos) {
-+    ui.add_space(6.0);
-+    titulo(ui, "Qué quieres crear", t);
-+    let grupos: Vec<String> = Grupo::TODOS.iter().map(|g| g.nombre().to_string()).collect();
-+    let grupo = e.modo.grupo();
-+    let elegido = Grupo::TODOS.iter().position(|g| *g == grupo).unwrap_or(0);
-+    if let Some(i) = segmentos(ui, &grupos, elegido, t)
-+        && let Some(g) = Grupo::TODOS.get(i)
-+        && *g != grupo
-+        && let Some(m) = g.modos().first()
-+    {
-+        e.modo = *m;
++/// Jacnex: la herramienta usa créditos (con el motor elegido).
++fn usa_creditos(e: &Estado, m: Modo) -> bool {
++    match m {
++        Modo::Subtitulos | Modo::Silencios | Modo::Muletillas | Modo::PorTexto => e.edicion.en_nube(),
++        Modo::Vertical => e.vertical.en_nube(),
++        Modo::Buscar => e.buscar.con_ia,
++        _ => true,
 +    }
-+    let modos = e.modo.grupo().modos();
-+    if modos.len() > 1 {
-+        ui.add_space(2.0);
-+        let nombres: Vec<String> = modos.iter().map(|m| m.nombre().to_string()).collect();
-+        let elegido = modos.iter().position(|m| *m == e.modo).unwrap_or(0);
-+        if let Some(i) = segmentos(ui, &nombres, elegido, t)
-+            && let Some(m) = modos.get(i)
++}
++
++/// Jacnex: lo que se ve a la derecha de una fila de la barra lateral.
++enum Marca<'a> {
++    Nada,
++    /// Cuántas herramientas tiene el grupo (cerrado).
++    Cuenta(&'a str),
++    /// La herramienta usa créditos.
++    Creditos,
++}
++
++/// Jacnex: una fila de la barra lateral (grupo o herramienta). `sangria` > 0 = herramienta.
++fn fila_lado(ui: &mut egui::Ui, icono: crate::icons::Icon, nombre: &str, marca: Marca, on: bool, sangria: f32, t: &crate::theme::Tokens) -> egui::Response {
++    let alto = if sangria > 0.0 { 26.0 } else { 28.0 };
++    let (fila, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), alto), egui::Sense::click());
++    let rect = egui::Rect::from_min_max(fila.min + egui::vec2(sangria, 0.0), fila.max);
++    let p = ui.painter();
++    if on {
++        p.rect_filled(rect, 6.0, ACENTO.gamma_multiply(0.55));
++        if sangria > 0.0 {
++            let barra = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 5.0), egui::vec2(2.0, rect.height() - 10.0));
++            p.rect_filled(barra, 1.0, ACENTO_CLARO);
++        }
++    } else if resp.hovered() {
++        p.rect_filled(rect, 6.0, t.hover);
++    }
++    let lado_icono = if sangria > 0.0 { 14.0 } else { 16.0 };
++    let r_icono = egui::Rect::from_center_size(egui::pos2(rect.left() + 8.0 + lado_icono / 2.0, rect.center().y), egui::vec2(lado_icono, lado_icono));
++    let color_icono = if on {
++        Color32::WHITE
++    } else if sangria > 0.0 {
++        t.text_dim
++    } else {
++        ACENTO_CLARO.gamma_multiply(0.8)
++    };
++    crate::icons::paint(p, r_icono, icono, color_icono);
++    let fuente = if sangria > 0.0 { crate::theme::Tokens::ui(12.5) } else { crate::theme::Tokens::semibold(13.0) };
++    let color = if on { Color32::WHITE } else { t.text };
++    p.text(egui::pos2(r_icono.right() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, nombre, fuente, color);
++    let creditos = matches!(marca, Marca::Creditos);
++    match marca {
++        Marca::Cuenta(d) => {
++            p.text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, d, crate::theme::Tokens::ui(11.0), t.text_dim);
++        }
++        Marca::Creditos => {
++            p.circle_filled(egui::pos2(rect.right() - 10.0, rect.center().y), 3.0, if on { ACENTO_CLARO } else { ACENTO });
++        }
++        Marca::Nada => {}
++    }
++    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, nombre));
++    if creditos { resp.on_hover_text("Usa créditos") } else { resp }
++}
++
++/// Jacnex: la barra lateral: los grupos y, en el abierto, sus herramientas.
++fn lado(ui: &mut egui::Ui, e: &mut Estado, t: &crate::theme::Tokens) {
++    ui.spacing_mut().item_spacing.y = 2.0;
++    let abierto = e.modo.grupo();
++    for g in Grupo::TODOS {
++        let modos = g.modos();
++        let unico = modos.len() == 1;
++        let es = g == abierto;
++        let cuenta = modos.len().to_string();
++        let marca = if !unico && !es {
++            Marca::Cuenta(cuenta.as_str())
++        } else if unico && modos.first().is_some_and(|m| usa_creditos(e, *m)) {
++            Marca::Creditos
++        } else {
++            Marca::Nada
++        };
++        if fila_lado(ui, g.icono(), g.nombre(), marca, es && unico, 0.0, t).clicked()
++            && !es
++            && let Some(m) = modos.first()
 +        {
 +            e.modo = *m;
 +        }
++        if es && !unico {
++            for m in modos {
++                let marca = if usa_creditos(e, *m) { Marca::Creditos } else { Marca::Nada };
++                if fila_lado(ui, m.icono(), m.nombre(), marca, *m == e.modo, 12.0, t).clicked() {
++                    e.modo = *m;
++                }
++            }
++            ui.add_space(4.0);
++        }
 +    }
-+    ui.label(RichText::new(e.modo.explicacion()).small().color(t.text_dim));
-+    ui.add_space(6.0);
++}
++
++/// Jacnex: la cabecera de la herramienta elegida: ícono, nombre y una línea.
++fn cabecera(ui: &mut egui::Ui, m: Modo, t: &crate::theme::Tokens) {
++    ui.horizontal(|ui| {
++        let (r, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
++        let p = ui.painter();
++        p.rect_filled(r, 8.0, ACENTO.gamma_multiply(0.22));
++        p.rect_stroke(r, 8.0, egui::Stroke::new(1.0, ACENTO.gamma_multiply(0.45)), egui::StrokeKind::Inside);
++        crate::icons::paint(p, r.shrink(9.0), m.icono(), ACENTO_CLARO);
++        ui.add_space(4.0);
++        ui.vertical(|ui| {
++            ui.spacing_mut().item_spacing.y = 1.0;
++            ui.label(RichText::new(m.nombre()).font(crate::theme::Tokens::semibold(15.0)).color(t.text));
++            ui.label(RichText::new(m.explicacion()).small().color(t.text_dim));
++        });
++    });
++}
++
++/// Jacnex: `#RRGGBB` → color (o `otro` si no se entiende).
++fn color_hex(hex: &str, otro: Color32) -> Color32 {
++    let canal = |i: usize| hex.get(i..i + 2).and_then(|c| u8::from_str_radix(c, 16).ok());
++    match (hex.starts_with('#'), canal(1), canal(3), canal(5)) {
++        (true, Some(r), Some(g), Some(b)) if hex.len() == 7 => Color32::from_rgb(r, g, b),
++        _ => otro,
++    }
++}
++
++/// Jacnex: una vista previa de los subtítulos con el estilo, la posición y el color elegidos.
++fn previa_subtitulos(ui: &mut egui::Ui, ed: &crate::jacnex_edicion::Edicion, t: &crate::theme::Tokens) {
++    use egui::text::{LayoutJob, TextFormat};
++    let ancho = ui.available_width().max(60.0);
++    let alto = (ancho * 9.0 / 16.0).min(200.0);
++    let (rect, _) = ui.allocate_exact_size(egui::vec2(ancho, alto), egui::Sense::hover());
++    let p = ui.painter().with_clip_rect(rect);
++    let mut fondo = egui::Mesh::default();
++    let (arriba, abajo) = (Color32::from_rgb(52, 66, 86), Color32::from_rgb(15, 18, 23));
++    fondo.colored_vertex(rect.left_top(), arriba);
++    fondo.colored_vertex(rect.right_top(), arriba);
++    fondo.colored_vertex(rect.right_bottom(), abajo);
++    fondo.colored_vertex(rect.left_bottom(), abajo);
++    fondo.add_triangle(0, 1, 2);
++    fondo.add_triangle(0, 2, 3);
++    p.add(fondo);
++    // Una silueta: cabeza y hombros.
++    let cx = rect.center().x;
++    p.circle_filled(egui::pos2(cx, rect.top() + alto * 0.36), alto * 0.13, Color32::from_rgb(104, 122, 145));
++    p.circle_filled(egui::pos2(cx, rect.bottom() + alto * 0.22), alto * 0.42, Color32::from_rgb(72, 86, 104));
++    let resalte = color_hex(ed.color_actual(), Color32::from_rgb(255, 214, 0));
++    let tam = (alto * 0.09).clamp(11.0, 18.0);
++    let fuerte = |c: Color32, s: f32| TextFormat::simple(crate::theme::Tokens::semibold(s), c);
++    let mut job = LayoutJob::default();
++    let estilo = ed.estilo_actual();
++    match estilo {
++        "word" => job.append("TODOS", 0.0, fuerte(resalte, tam * 1.5)),
++        "classic" => job.append("Hola a todos, bienvenidos", 0.0, TextFormat::simple(crate::theme::Tokens::ui(tam * 0.95), Color32::WHITE)),
++        _ => {
++            job.append("HOLA A ", 0.0, fuerte(Color32::WHITE, tam));
++            job.append("TODOS", 0.0, fuerte(resalte, tam));
++            job.append(" BIENVENIDOS", 0.0, fuerte(Color32::WHITE, tam));
++        }
++    }
++    let galley = p.layout_job(job);
++    let gs = galley.size();
++    let y = match ed.posicion_actual() {
++        "top" => rect.top() + alto * 0.12,
++        "middle" => rect.center().y - gs.y / 2.0,
++        _ => rect.bottom() - alto * 0.12 - gs.y,
++    };
++    let pos = egui::pos2(cx - gs.x / 2.0, y);
++    if estilo == "classic" {
++        p.rect_filled(egui::Rect::from_min_size(pos, gs).expand2(egui::vec2(8.0, 3.0)), 3.0, Color32::from_black_alpha(170));
++    } else {
++        p.galley_with_override_text_color(pos + egui::vec2(0.0, 2.0), galley.clone(), Color32::from_black_alpha(220));
++    }
++    p.galley(pos, galley, Color32::WHITE);
++    let etiqueta = p.layout_no_wrap("Vista previa".to_string(), crate::theme::Tokens::ui(10.0), Color32::WHITE);
++    let caja = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), etiqueta.size() + egui::vec2(10.0, 2.0));
++    p.rect_filled(caja, 4.0, Color32::from_black_alpha(115));
++    p.galley(caja.min + egui::vec2(5.0, 1.0), etiqueta, Color32::WHITE);
++    ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
++}
++
++fn cuerpo(ui: &mut egui::Ui, e: &mut Estado, cx: &Contexto, t: &crate::theme::Tokens, pide: &mut Pedidos) {
++    if e.modo == Modo::Subtitulos {
++        previa_subtitulos(ui, &e.edicion, t);
++        ui.add_space(8.0);
++    }
 +    match e.modo {
 +        Modo::Foto => {
 +            titulo(ui, "Foto", t);
@@ -19893,7 +20192,6 @@ index 0000000..7841c1b
 +            match &cx.mejora {
 +                Some(Ok(c)) => {
 +                    ui.label(RichText::new(format!("{} · {:.1} s", c.nombre, c.segundos)).color(t.text));
-+                    ui.label(RichText::new("El clip seleccionado o, si no hay, el que está bajo el cabezal.").small().color(t.text_dim));
 +                }
 +                Some(Err(m)) => {
 +                    ui.label(RichText::new(*m).color(ROJO));
@@ -19941,7 +20239,6 @@ index 0000000..7841c1b
 +        });
 +        ui.add_space(8.0);
 +    }
-+    titulo(ui, "Ajustes", t);
 +    if let Some(d) = e.modo.local() {
 +        ajustes_edicion(ui, &mut e.edicion, d, t);
 +    } else if e.modo == Modo::Corta {
@@ -20181,13 +20478,6 @@ index 0000000..7841c1b
 +            ed.pide_descarga = None;
 +        }
 +    });
-+    let nota = if ed.en_nube() {
-+        "En el servidor de Jacnex: rápido en cualquier computadora; usa créditos."
-+    } else {
-+        "En esta computadora, sin créditos. Necesita unos 5 GB de memoria libre."
-+    };
-+    ui.label(RichText::new(nota).small().color(t.text_dim));
-+    ui.add_space(4.0);
 +    match d {
 +        Despues::Subtitulos => {
 +            fila(ui, "Estilo", t, |ui| {
@@ -20217,12 +20507,6 @@ index 0000000..7841c1b
 +                    }
 +                });
 +            }
-+            let nota = match ed.estilo_actual() {
-+                "word" => "Una palabra a la vez, grande y con un pequeño salto.",
-+                "classic" => "La frase completa sobre una franja oscura.",
-+                _ => "La frase completa; la palabra que se dice cambia de color.",
-+            };
-+            ui.label(RichText::new(nota).small().color(t.text_dim));
 +        }
 +        Despues::Silencios => {
 +            fila(ui, "Pausas de", t, |ui| {
@@ -20243,7 +20527,6 @@ index 0000000..7841c1b
 +            ed.idioma = c.into();
 +        }
 +    });
-+    ui.label(RichText::new("Lo que se habla en el video (para transcribir).").small().color(t.text_dim));
 +}
 +
 +/// Jacnex: los ajustes de «Vertical»: la forma, el motor y lo propio de cada motor.
@@ -20284,12 +20567,7 @@ index 0000000..7841c1b
 +            let texto = format!("{:.0} créditos por segundo de clip.", c as f64 / 100.0);
 +            ui.label(RichText::new(texto).small().color(t.text_dim));
 +        }
-+        let nota = format!("La IA reencuadra un clip de hasta {MAX_NUBE:.0} s (el elegido o el que está bajo el cabezal) y lo agrega como clip nuevo.");
-+        ui.label(RichText::new(nota).small().color(t.text_dim));
-+    } else {
-+        ui.label(
-+            RichText::new("Detecta caras y personas, ve quién habla y mueve la cámara con suavidad; en los cortes cambia de plano.").small().color(t.text_dim),
-+        );
++        ui.label(RichText::new(format!("Clips de hasta {MAX_NUBE:.0} s.")).small().color(t.text_dim));
 +    }
 +}
 +
@@ -20306,7 +20584,7 @@ index 0000000..7841c1b
 +            ui.add(egui::ProgressBar::new(f.clamp(0.0, 1.0)).desired_height(6.0).fill(ACENTO));
 +        }
 +        ui.horizontal(|ui| {
-+            ui.label(RichText::new("Analizar tarda más que lo que dura el video. Puedes seguir editando.").small().color(t.text_dim));
++            ui.label(RichText::new("Puedes seguir editando.").small().color(t.text_dim));
 +            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 +                if ui.small_button("Detener").clicked() {
 +                    v.detener();
@@ -20314,8 +20592,6 @@ index 0000000..7841c1b
 +            });
 +        });
 +    } else {
-+        ui.label(RichText::new("Se hace en esta computadora: no usa créditos.").small().strong().color(ACENTO_CLARO));
-+        ui.add_space(2.0);
 +        if boton_acento(ui, e.modo.accion(), egui::vec2(ancho, 36.0), cx.falta.is_none()).clicked() {
 +            pide.vertical = true;
 +        }
@@ -20368,7 +20644,6 @@ index 0000000..7841c1b
 +    } else if let Some((bytes, despues)) = ed.pide_descarga {
 +        let mb = bytes.div_ceil(MB).max(1);
 +        ui.label(RichText::new(format!("La primera vez se descarga el modelo de voz (unos {mb} MB).")).strong());
-+        ui.label(RichText::new("Queda en esta computadora: las siguientes veces no se descarga de nuevo.").small().color(t.text_dim));
 +        ui.add_space(4.0);
 +        ui.horizontal(|ui| {
 +            if boton_acento(ui, &format!("Descargar {mb} MB y seguir"), egui::vec2(ancho - 90.0, 32.0), true).clicked() {
@@ -20379,15 +20654,13 @@ index 0000000..7841c1b
 +            }
 +        });
 +    } else {
-+        if !ed.en_nube() {
-+            ui.label(RichText::new("Se hace en esta computadora: no usa créditos.").small().strong().color(ACENTO_CLARO));
-+        } else if let Some(c) = cx.costo_nube {
-+            let texto = format!("Transcribir cuesta {} (0,3 por minuto).", creditos(c));
++        if ed.en_nube()
++            && let Some(c) = cx.costo_nube
++        {
++            let texto = format!("Transcribir cuesta {}.", creditos(c));
 +            ui.label(RichText::new(texto).small().strong().color(ACENTO_CLARO));
-+        } else {
-+            ui.label(RichText::new("Nemotron usa créditos solo si falta transcribir algo.").small().color(t.text_dim));
++            ui.add_space(2.0);
 +        }
-+        ui.add_space(2.0);
 +        if boton_acento(ui, e.modo.accion(), egui::vec2(ancho, 36.0), cx.falta.is_none()).clicked() {
 +            pide.editar = Some((d, false));
 +        }
@@ -21514,7 +21787,7 @@ index 0000000..c003864
 +}
 diff --git a/crates/ui-egui/src/jacnex_vertical.rs b/crates/ui-egui/src/jacnex_vertical.rs
 new file mode 100644
-index 0000000..d1aaf68
+index 0000000..bcbb6b2
 --- /dev/null
 +++ b/crates/ui-egui/src/jacnex_vertical.rs
 @@ -0,0 +1,261 @@
@@ -21544,7 +21817,7 @@ index 0000000..d1aaf68
 +/// Las formas que se ofrecen: (id, nombre).
 +pub const ASPECTOS: &[(&str, &str)] = &[("9:16", "Vertical 9:16"), ("1:1", "Cuadrado 1:1"), ("4:5", "Retrato 4:5")];
 +/// Quién reencuadra: (id, nombre).
-+pub const MOTORES: &[(&str, &str)] = &[("local", "En esta computadora"), ("nube", "Con IA (créditos)")];
++pub const MOTORES: &[(&str, &str)] = &[("local", "En tu PC"), ("nube", "Con IA (créditos)")];
 +/// El clip más largo que acepta el motor con créditos, en segundos.
 +pub const MAX_NUBE: f64 = 10.0;
 +
@@ -21857,29 +22130,156 @@ index 293ee97..1f3dbdb 100644
      /// The native file dialog the host is showing ([`Self::pick`]).
      native_dialog: Option<native_dialogs::PendingDialog>,
      /// A save dialog's answer waiting for Replace or Cancel ([`native_dialogs`]).
+diff --git a/crates/ui-egui/src/links.rs b/crates/ui-egui/src/links.rs
+index c87c4f6..7f44427 100644
+--- a/crates/ui-egui/src/links.rs
++++ b/crates/ui-egui/src/links.rs
+@@ -1,28 +1,25 @@
+ //! Community and project links (Help menu, About dialog, header WhatsApp button, Home screen).
+ //!
+ //! Filmnex is part of the Jacnex family: the community lives on the Jacnex WhatsApp, every
+-//! app has a page on the Jacnex website and a public GitHub repository.
++//! app has a page on the Jacnex website.
+ 
+-/// The app's short name, used in the website and repository URLs.
+-pub const APP: &str = "filmcraft";
++/// The app's short name, used in the website URL.
++pub const APP: &str = "filmnex";
+ 
+ /// The Jacnex community WhatsApp.
+ pub const WHATSAPP: &str = "https://jacnex.store/whatsapp";
+ /// The Jacnex website.
+ pub const WEBSITE: &str = "https://jacnex.store";
+ /// Filmnex's page on the Jacnex website.
+-pub const APP_PAGE: &str = "https://jacnex.store/apps/filmcraft";
+-/// Filmnex's source repository.
+-pub const GITHUB: &str = "https://github.com/jacnexstudio/filmcraft";
++pub const APP_PAGE: &str = "https://app.jacnex.store/apps/filmnex/";
+ /// New issue on Filmnex's repository.
+ pub const ISSUES: &str = "https://github.com/jacnexstudio/filmcraft/issues";
+ 
+ /// (command id, label, url) for every link, in menu order.
+-pub const ALL: [(&str, &str, &str); 5] = [
++pub const ALL: [(&str, &str, &str); 4] = [
+     ("help.discord", "Join the Jacnex WhatsApp group…", WHATSAPP),
+     ("help.website", "Jacnex Website", WEBSITE),
+     ("help.appPage", "Filmnex on jacnex.store", APP_PAGE),
+-    ("help.github", "Filmnex on GitHub", GITHUB),
+     ("help.reportIssue", "Report an Issue…", ISSUES),
+ ];
+ 
+@@ -50,7 +47,6 @@ pub fn menu_hint(command: &str) -> Option<String> {
+             "help.revealLogFiles" => tl!("Saves this session's log and shows it in your file manager."),
+             "help.systemCompatibilityReport" => tl!("Shows a report on this computer."),
+             "app.about" => tl!("Shows the version, community links and credits in a Filmnex window."),
+-            "app.checkForUpdates" => tl!("Looks for a newer Filmnex release and offers to update."),
+             _ => return None,
+         }
+         .to_string(),
+@@ -127,8 +123,8 @@ mod tests {
+ 
+     #[test]
+     fn urls_follow_the_jacnex_scheme() {
+-        assert_eq!(APP_PAGE, format!("{WEBSITE}/apps/{APP}"));
+-        assert_eq!(GITHUB, format!("https://github.com/jacnexstudio/{APP}"));
++        assert_eq!(APP_PAGE, format!("https://app.jacnex.store/apps/{APP}/"));
++        assert!(ALL.iter().all(|(_, label, u)| !label.contains("GitHub") && !u.contains("filmcraft")));
+         assert!(ALL.iter().all(|(id, _, u)| id.starts_with("help.") && u.starts_with("https://")));
+         assert_eq!(url_for("help.discord"), Some(WHATSAPP));
+         assert_eq!(url_for("help.nope"), None);
+@@ -181,11 +177,11 @@ mod tests {
+             out.textures_delta.clear();
+             out
+         };
+-        open(&mut app, &egui::Context::default(), GITHUB);
++        open(&mut app, &egui::Context::default(), APP_PAGE);
+         for _ in 0..3 {
+             frame(&mut app, Vec::new());
+         }
+-        assert!(app.auto.elements.iter().find(|e| e.id == "failedLink.url").is_some_and(|e| e.label == GITHUB), "address shown");
++        assert!(app.auto.elements.iter().find(|e| e.id == "failedLink.url").is_some_and(|e| e.label == APP_PAGE), "address shown");
+         let at = |app: &crate::FilmcraftApp, id: &str| {
+             app.auto.elements.iter().find(|e| e.id == id).map(|e| egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)).unwrap()
+         };
+@@ -201,7 +197,7 @@ mod tests {
+             copied
+         };
+         let copy = at(&app, "failedLink.copy");
+-        assert_eq!(click(&mut app, copy), [GITHUB]);
++        assert_eq!(click(&mut app, copy), [APP_PAGE]);
+         // other frames (another window in front) don't close it; Close does
+         for _ in 0..3 {
+             frame(&mut app, Vec::new());
 diff --git a/crates/ui-egui/src/menus.rs b/crates/ui-egui/src/menus.rs
-index 7b1b02a..10bf77c 100644
+index 7b1b02a..f09030e 100644
 --- a/crates/ui-egui/src/menus.rs
 +++ b/crates/ui-egui/src/menus.rs
-@@ -148,6 +148,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
+@@ -148,13 +148,12 @@ pub const UI_COMMANDS: &[UiCommand] = &[
      uic!("mode.edit", "Edit", [], None),
      uic!("mode.export", "Export", ["File", "Export"], Some("Cmd+M")),
      uic!("help.discord", "Join the Jacnex WhatsApp group…", ["Help"], None),
 +    uic!("jacnex.ia", "Jacnex AI…", ["Clip"], None),
      uic!("help.website", "Jacnex Website", ["Help"], None),
      uic!("help.appPage", "Filmnex on jacnex.store", ["Help"], None),
-     uic!("help.github", "Filmnex on GitHub", ["Help"], None),
-@@ -506,6 +507,10 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
+-    uic!("help.github", "Filmnex on GitHub", ["Help"], None),
+     uic!("help.reportIssue", "Report an Issue…", ["Help"], None),
+     uic!("help.revealLogFiles", "Reveal Log Files…", ["Help"], None),
+     uic!("help.systemCompatibilityReport", "System Compatibility Report…", ["Help"], None),
+-    uic!("app.checkForUpdates", "Check for Updates…", ["Help"], None),
+     uic!("app.about", "About Filmnex", ["Help"], None),
+     uic!("app.keyboardShortcuts", "Keyboard Shortcuts…", ["Edit"], Some("Cmd+Alt+K")),
+     uic!("app.settings.general", "General…", ["Edit", "Preferences"], Some("Cmd+,")),
+@@ -506,9 +505,9 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
              app.ui.mode = Mode::Export;
              return Ok(Value::Null);
          }
+-        "app.checkForUpdates" => {
+-            let _ = crate::updates_ui::check(app);
+-            return Ok(serde_json::Value::Null);
 +        "jacnex.ia" => {
 +            crate::jacnex_ia::alternar(app);
 +            return Ok(Value::Null);
-+        }
-         "app.checkForUpdates" => {
-             let _ = crate::updates_ui::check(app);
-             return Ok(serde_json::Value::Null);
+         }
+         "app.about" => {
+             app.dialog = Some(crate::Dialog::About);
+diff --git a/crates/ui-egui/src/panels/dialogs.rs b/crates/ui-egui/src/panels/dialogs.rs
+index f3010fb..a0c515e 100644
+--- a/crates/ui-egui/src/panels/dialogs.rs
++++ b/crates/ui-egui/src/panels/dialogs.rs
+@@ -504,7 +504,6 @@ fn about_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
+     ui.add_space(6.0);
+     link(ui, "website", Icon::Globe, "jacnex.store", links::WEBSITE, false);
+     link(ui, "appPage", Icon::Globe, tl!("Filmnex on jacnex.store"), links::APP_PAGE, false);
+-    link(ui, "github", Icon::Code, tl!("Source code on GitHub"), links::GITHUB, false);
+     link(ui, "reportIssue", Icon::Code, tl!("Report an issue"), links::ISSUES, false);
+     ui.add_space(10.0);
+     ui.label(egui::RichText::new(tl!("MIT OR Apache-2.0. Fonts: Inter, Noto Serif and JetBrains Mono (SIL OFL 1.1).")).small().color(t.text_dim));
+diff --git a/crates/ui-egui/src/panels/keyboard.rs b/crates/ui-egui/src/panels/keyboard.rs
+index 6cad401..23d766c 100644
+--- a/crates/ui-egui/src/panels/keyboard.rs
++++ b/crates/ui-egui/src/panels/keyboard.rs
+@@ -138,7 +138,7 @@ pub const COMMANDS: &[UiCommand] = &[
+ ];
+ 
+ /// Filmnex's documentation (Help ▸ Filmnex Help…, F1).
+-pub const HELP_URL: &str = "https://github.com/jacnexstudio/filmcraft/tree/main/docs";
++pub const HELP_URL: &str = crate::links::APP_PAGE;
+ 
+ const HEIGHT_STEP: f32 = 12.0;
+ const MIN_TRACK_H: f32 = 24.0;
+diff --git a/crates/ui-egui/src/panels/settings.rs b/crates/ui-egui/src/panels/settings.rs
+index 1e4686d..fdb964f 100644
+--- a/crates/ui-egui/src/panels/settings.rs
++++ b/crates/ui-egui/src/panels/settings.rs
+@@ -926,7 +926,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
+         ui.horizontal(|ui| {
+             ui.add_space(20.0);
+             if button(app, ui, "settings.help", tl!("Help"), false) {
+-                crate::links::open(app, ctx, &format!("{}/blob/main/docs/project-files.md#settings", crate::links::GITHUB));
++                crate::links::open(app, ctx, crate::links::APP_PAGE);
+             }
+             if button(app, ui, "settings.reset", tl!("Reset…"), false) {
+                 // this category back to its defaults (OK applies it)
 diff --git a/crates/ui-egui/src/panels/text.rs b/crates/ui-egui/src/panels/text.rs
 index 043992c..8d00b51 100644
 --- a/crates/ui-egui/src/panels/text.rs
@@ -21922,6 +22322,103 @@ index 043992c..8d00b51 100644
          (Icon::Captions, "text.transcript.createCaptions", tl!("Create captions"), true, "transcript.createCaptions", json!({})),
      ];
      for (icon, id, label, enabled, cmd, params) in tools {
+diff --git a/crates/ui-egui/src/panels/timeline.rs b/crates/ui-egui/src/panels/timeline.rs
+index b55e32e..f440e41 100644
+--- a/crates/ui-egui/src/panels/timeline.rs
++++ b/crates/ui-egui/src/panels/timeline.rs
+@@ -824,7 +824,7 @@ fn mix_volume(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, r: Rect
+     }
+ }
+ 
+-/// Shown when no sequence is open: offers the demo project and accepts project or OS-file drops to create a sequence.
++/// Shown when no sequence is open: offers to import media and accepts project or OS-file drops to create a sequence.
+ fn empty_state(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+     let t = app.tokens;
+     ui.painter().text(rect.center() - vec2(0.0, 12.0), Align2::CENTER_CENTER, tl!("Drop media here to create sequence."), Tokens::ui(13.0), t.text_dim);
+@@ -833,12 +833,16 @@ fn empty_state(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+         ui.painter().text(rect.center() + vec2(0.0, 50.0), Align2::CENTER_CENTER, hint, Tokens::ui(12.0), t.text_dim);
+     }
+     let b = Rect::from_center_size(rect.center() + vec2(0.0, 20.0), vec2(170.0, 26.0));
+-    let resp = ui.interact(b, egui::Id::unique("tl-open-demo"), Sense::click());
+-    app.auto.add("timeline.openDemo", b, "Open Demo Project");
++    let resp = ui.interact(b, egui::Id::unique("tl-import-media"), Sense::click());
++    app.auto.add("timeline.importMedia", b, "Import Media");
+     ui.painter().rect_filled(b, 13.0, if resp.hovered() { t.accent_hover } else { t.accent });
+-    ui.painter().text(b.center(), Align2::CENTER_CENTER, tl!("Open Demo Project"), Tokens::semibold(12.0), Color32::WHITE);
++    ui.painter().text(b.center(), Align2::CENTER_CENTER, tl!("Import Media"), Tokens::semibold(12.0), Color32::WHITE);
+     if resp.clicked() {
+-        let _ = app.session.execute("file.openDemoProject", json!({}));
++        // Jacnex: a clean start offers the user's own media, not the demo project
++        let ctx = ui.ctx().clone();
++        if let Err(e) = crate::menus::invoke(app, &ctx, "file.import", json!({})) {
++            app.ui.status = e;
++        }
+     }
+     // accept drops from the project panel
+     if let Some(item) = crate::panels::dragged_project_item(ui)
+diff --git a/crates/ui-egui/src/updates_ui.rs b/crates/ui-egui/src/updates_ui.rs
+index 9029603..f04855c 100644
+--- a/crates/ui-egui/src/updates_ui.rs
++++ b/crates/ui-egui/src/updates_ui.rs
+@@ -1,7 +1,5 @@
+ //! Software updates, background check at startup, and startup prompt modal.
+ 
+-use serde_json::Value;
+-
+ use crate::FilmcraftApp;
+ 
+ #[cfg(not(target_arch = "wasm32"))]
+@@ -47,23 +45,6 @@ impl FilmcraftApp {
+     }
+ }
+ 
+-pub(crate) fn check(app: &mut FilmcraftApp) -> Result<Value, String> {
+-    #[cfg(not(target_arch = "wasm32"))]
+-    {
+-        app.updates_rt.check_requested = true;
+-        app.updates_rt.manual_window_open = true;
+-        if let Some(ctx) = &app.updates_rt.repaint {
+-            ctx.request_repaint();
+-        }
+-        Ok(Value::Null)
+-    }
+-    #[cfg(target_arch = "wasm32")]
+-    {
+-        app.updates_rt.manual_window_open = true;
+-        Ok(Value::Null)
+-    }
+-}
+-
+ pub(crate) fn tick(app: &mut FilmcraftApp, ctx: &egui::Context) {
+     #[cfg(not(target_arch = "wasm32"))]
+     {
+diff --git a/crates/ui-egui/tests/it/links_ui.rs b/crates/ui-egui/tests/it/links_ui.rs
+index a28159b..d75d5cf 100644
+--- a/crates/ui-egui/tests/it/links_ui.rs
++++ b/crates/ui-egui/tests/it/links_ui.rs
+@@ -93,11 +93,11 @@ fn community_links_everywhere() {
+     // Header: the WhatsApp button is always there.
+     assert_eq!(d.ids("header.discord"), vec!["header.discord".to_string()]);
+     d.snapshot("header");
+-    // About dialog: WhatsApp first, then website, app page, GitHub, issues.
++    // About dialog: WhatsApp first, then website, app page, issues.
+     d.ok("engine.execute", json!({"command": "app.about", "params": {}}));
+     d.frames(3);
+     let about = d.ids("about.");
+-    for id in ["about.discord", "about.website", "about.appPage", "about.github", "about.reportIssue"] {
++    for id in ["about.discord", "about.website", "about.appPage", "about.reportIssue"] {
+         assert!(about.iter().any(|a| a == id), "{id} in {about:?}");
+     }
+     d.snapshot("about");
+@@ -108,7 +108,7 @@ fn community_links_everywhere() {
+     d.ok("engine.execute", json!({"command": "mode.import", "params": {}}));
+     d.frames(3);
+     let home = d.ids("import.link.");
+-    for id in ["import.link.discord", "import.link.website", "import.link.appPage", "import.link.github"] {
++    for id in ["import.link.discord", "import.link.website", "import.link.appPage", "import.link.reportIssue"] {
+         assert!(home.iter().any(|a| a == id), "{id} in {home:?}");
+     }
+     d.snapshot("home");
 diff --git a/packaging/windows/package.ps1 b/packaging/windows/package.ps1
 index 8837768..47bad7b 100644
 --- a/packaging/windows/package.ps1
