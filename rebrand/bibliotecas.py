@@ -32,6 +32,12 @@ los instaladores publicados por "Learning Machines LLC". Jacnex Studio 0.19.3 y 
 encontraban su instalación (publicada por "Jacnex") y decían "Windows lists this app's
 installation more than once or not at all". Ahora se actualiza como el launcher de ArtCraft. Las
 apps ponen al día también esas dos versiones (ver MODULO).
+
+Ajuste: el aviso de actualización de cada app la actualiza con Jacnex Studio (ver AJUSTES_MSI,
+"dialog.rs"). El botón ya no descarga desde la página de la versión ni se actualiza dentro de la
+app: abre Jacnex Studio con "--actualizar <app>" y cierra la app; Jacnex Studio espera a que se
+cierre, la actualiza y la vuelve a abrir. Si Jacnex Studio no está instalado, el aviso lo dice.
+El aviso está en español ("translate.rs") y no enlaza a la página de la versión.
 """
 
 import os
@@ -81,6 +87,9 @@ AJUSTES = [
     ),
 ]
 
+# Un ajuste marcado así se salta en las versiones de craft-update que no tienen el texto.
+OPCIONAL = "opcional"
+
 # Archivo de craft-update (junto a self_update.rs) -> ajustes, en las versiones que lo tienen.
 AJUSTES_MSI = {
     "msi_copy.rs": [
@@ -111,6 +120,131 @@ AJUSTES_MSI = {
             "    publisher == PUBLISHER && app.names().any(|n| n == display_name)\n",
             "    // Jacnex: los instaladores de Jacnex los publica \"Jacnex\".\n"
             "    (publisher == PUBLISHER || publisher == \"Jacnex\") && app.names().any(|n| n == display_name)\n",
+        ),
+    ],
+    "dialog.rs": [
+        # El botón del aviso abre Jacnex Studio, que actualiza la app (ver MODULO), y cierra la app.
+        (
+            "        if response == StartupPromptResponse::Later {\n"
+            "            self.open = false;\n"
+            "        }\n\n"
+            "        response\n"
+            "    }\n",
+            "        // Jacnex: el botón no descarga ni actualiza dentro de la app: abre Jacnex Studio, que la\n"
+            "        // actualiza en cuanto se cierra y la vuelve a abrir.\n"
+            "        #[cfg(windows)]\n"
+            "        if matches!(response, StartupPromptResponse::UpdateAndRestart | StartupPromptResponse::Download)\n"
+            "            && self.app.id != \"jacnex-studio\"\n"
+            "        {\n"
+            "            match crate::self_update::jacnex_actualizar_con_launcher(self.app) {\n"
+            "                Ok(()) => {\n"
+            "                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);\n"
+            "                    response = StartupPromptResponse::Later;\n"
+            "                }\n"
+            "                Err(e) => {\n"
+            "                    self.status_message = Some(e);\n"
+            "                    response = StartupPromptResponse::Pending;\n"
+            "                }\n"
+            "            }\n"
+            "        }\n\n"
+            "        if response == StartupPromptResponse::Later {\n"
+            "            self.open = false;\n"
+            "        }\n\n"
+            "        response\n"
+            "    }\n",
+        ),
+        # Bajo la descripción, qué pasa al actualizar.
+        (
+            "                            ui.label(RichText::new(desc).size(12.5).color(text_muted));\n",
+            "                            ui.label(RichText::new(desc).size(12.5).color(text_muted));\n"
+            "                            // Jacnex: la actualiza Jacnex Studio.\n"
+            "                            if cfg!(windows) && self.app.id != \"jacnex-studio\" {\n"
+            "                                let nota = format!(\"Al actualizar, {} se cierra y Jacnex Studio instala la nueva versión.\", self.app.name);\n"
+            "                                ui.label(RichText::new(nota).size(11.5).color(text_muted));\n"
+            "                            }\n",
+        ),
+        # El botón "Download" también actualiza (con Jacnex Studio): se llama como el otro. Unas
+        # versiones de craft-update tienen el texto traducible y otras fijo en inglés.
+        (
+            "RichText::new(button(t, \"Download\"))",
+            "RichText::new(/* Jacnex: lo actualiza Jacnex Studio */ button(t, \"Update and Restart\"))",
+            OPCIONAL,
+        ),
+        (
+            "RichText::new(\"DOWNLOAD\")",
+            "RichText::new(/* Jacnex: lo actualiza Jacnex Studio */ \"UPDATE AND RESTART\")",
+            OPCIONAL,
+        ),
+        # Sin el enlace "What's new": abría la página de la versión en GitHub.
+        (
+            "                            // Body text, so it reads on any card; the underline carries the accent.\n"
+            "                            let whats_new = t(\"What's new\", &[]);\n"
+            "                            let link = ui.add(egui::Label::new(RichText::new(&whats_new).size(11.5).color(text_primary)).sense(egui::Sense::click()));\n"
+            "                            link.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, &whats_new));\n"
+            "                            let y = link.rect.bottom() - 0.5;\n"
+            "                            ui.painter()\n"
+            "                                .line_segment([egui::pos2(link.rect.left(), y), egui::pos2(link.rect.right(), y)], egui::Stroke::new(1.0, fill));\n"
+            "                            // Keyboard focus (Tab, then Enter or Space opens it): the buttons' 2 px ring.\n"
+            "                            if link.has_focus() {\n"
+            "                                let ring = egui::Stroke::new(2.0, text_primary);\n"
+            "                                ui.painter().rect_stroke(link.rect.expand(2.0), egui::CornerRadius::ZERO, ring, egui::StrokeKind::Outside);\n"
+            "                            }\n"
+            "                            // `Release`'s fields are public: an app may build one from its own feed or\n"
+            "                            // cache, so the link is checked here too, not only when parsed from GitHub.\n"
+            "                            if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && crate::release::safe_web_link(&self.release.html_url)\n"
+            "                            {\n"
+            "                                ui.ctx().open_url(egui::OpenUrl::new_tab(&self.release.html_url));\n"
+            "                            }\n"
+            "\n",
+            "                            // Jacnex: sin enlace a la página de la versión.\n\n",
+        ),
+    ],
+    "translate.rs": [
+        # El aviso en español: ninguna app de Jacnex le pasa un traductor a craft-update.
+        (
+            "pub fn english(text: &str, args: &[(&str, &str)]) -> String {\n"
+            "    fill(text, args)\n"
+            "}\n",
+            "pub fn english(text: &str, args: &[(&str, &str)]) -> String {\n"
+            "    // Jacnex: las apps de Jacnex están en español y no pasan traductor: el aviso también.\n"
+            "    fill(jacnex_es(text).unwrap_or(text), args)\n"
+            "}\n"
+            "\n"
+            "/// Jacnex: el aviso y sus mensajes en español.\n"
+            "fn jacnex_es(text: &str) -> Option<&'static str> {\n"
+            "    Some(match text {\n"
+            "        \"Later\" => \"Más tarde\",\n"
+            "        \"Update and Restart\" => \"Actualizar y reiniciar\",\n"
+            "        \"Restart to Update\" => \"Reiniciar para actualizar\",\n"
+            "        \"Download\" => \"Actualizar\",\n"
+            "        \"Dismiss\" => \"Ocultar\",\n"
+            "        \"Update\" => \"Actualización\",\n"
+            "        \"Check Again\" => \"Buscar de nuevo\",\n"
+            "        \"OK\" => \"Aceptar\",\n"
+            "        \"Close\" => \"Cerrar\",\n"
+            "        \"What's new\" => \"Novedades\",\n"
+            "        \"v{from} to {to}\" => \"v{from} a {to}\",\n"
+            "        \"by {developer}\" => \"por {developer}\",\n"
+            "        \"Downloading and installing update…\" => \"Descargando e instalando la actualización…\",\n"
+            "        \"{app} {version} is available with the latest features and bug fixes.\" => \"{app} {version} ya está disponible, con las últimas funciones y correcciones.\",\n"
+            "        \"Checking for updates…\" => \"Buscando actualizaciones…\",\n"
+            "        \"Installing update…\" => \"Instalando la actualización…\",\n"
+            "        \"{app} updated to {version}.\" => \"{app} se actualizó a la versión {version}.\",\n"
+            "        \"{app} {version} is the newest version available.\" => \"{app} {version} es la versión más reciente.\",\n"
+            "        \"{app} {version} follows the version chosen in the launcher, so it does not update itself.\" => \"{app} {version} usa la versión elegida en Jacnex Studio, así que no se actualiza sola.\",\n"
+            "        \"The update could not be installed: {reason}\" => \"No se pudo instalar la actualización: {reason}\",\n"
+            "        \"Could not check for updates.\" => \"No se pudo buscar actualizaciones.\",\n"
+            "        \"All releases are listed at {url}\" => \"Actualiza tus apps desde Jacnex Studio.\",\n"
+            "        \"Cannot auto-update this installation type. Please download manually.\" => \"Esta instalación no se actualiza sola. Actualízala desde Jacnex Studio.\",\n"
+            "        \"Close {app} to finish\" => \"Cierra {app} para terminar\",\n"
+            "        \"Close {app}\" => \"Cierra {app}\",\n"
+            "        \"Couldn't start the update ({error})\" => \"No se pudo iniciar la actualización ({error})\",\n"
+            "        \"Save or close your open work first; the update restarts the app.\" => \"Guarda o cierra tu trabajo antes: la actualización reinicia la app.\",\n"
+            "        \"The update failed unexpectedly.\" => \"La actualización falló de forma inesperada.\",\n"
+            "        \"The update stopped unexpectedly.\" => \"La actualización se detuvo de forma inesperada.\",\n"
+            "        _ => return None,\n"
+            "    })\n"
+            "}\n"
         ),
     ],
 }
@@ -161,6 +295,17 @@ mod jacnex_launcher {
                 log::warn!("Jacnex Studio no se pudo poner al día: {e}");
             }
         });
+    }
+
+    /// Abre Jacnex Studio con `--actualizar <app>`: espera a que la app se cierre, la actualiza y
+    /// la vuelve a abrir. Lo pide el botón del aviso de actualización de la app.
+    pub(super) fn actualizar_con_launcher(app: &App) -> Result<(), String> {
+        let exe = instalado().ok_or("Jacnex Studio no está instalado. Descárgalo en jacnex.store para actualizar.")?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--actualizar").arg(app.id);
+        // Una versión simulada (pruebas) no pasa a Jacnex Studio ni a la app que vuelve a abrir.
+        super::clear_pretend_version(&mut cmd, app);
+        process::spawn_detached(cmd)
     }
 
     /// El jacnex-studio.exe que instaló el MSI (por usuario).
@@ -241,6 +386,12 @@ mod jacnex_launcher {
         let _ = process::run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script], Duration::from_secs(60));
     }
 }
+
+/// Jacnex: el aviso de actualización de la app la actualiza con Jacnex Studio (ver `dialog.rs`).
+#[cfg(windows)]
+pub fn jacnex_actualizar_con_launcher(app: &App) -> Result<(), String> {
+    jacnex_launcher::actualizar_con_launcher(app)
+}
 '''
 
 
@@ -290,10 +441,12 @@ def aplicar(archivo, ajustes):
     """Como ajustar, para los archivos de AJUSTES_MSI."""
     texto = archivo.read_text(encoding="utf-8")
     antes = texto
-    for viejo, nuevo in ajustes:
+    for viejo, nuevo, *marcas in ajustes:
         if nuevo in texto:
             continue
         n = texto.count(viejo)
+        if n == 0 and OPCIONAL in marcas:
+            continue
         if n != 1:
             raise ErrorDeAjuste(f"{archivo}: se esperaba 1 coincidencia de {viejo[:80]!r} y hay {n}")
         texto = texto.replace(viejo, nuevo)

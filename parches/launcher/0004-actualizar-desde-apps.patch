@@ -1,0 +1,391 @@
+diff --git a/apps/jacnex-studio/src/jacnex_pedido.rs b/apps/jacnex-studio/src/jacnex_pedido.rs
+new file mode 100644
+index 0000000..6ee68ea
+--- /dev/null
++++ b/apps/jacnex-studio/src/jacnex_pedido.rs
+@@ -0,0 +1,224 @@
++//! Jacnex: an app's update notice asks Jacnex Studio to update it. The app's "Update" button starts
++//! the launcher with `--actualizar <app>` and closes itself; the launcher waits for the app to be
++//! closed, updates it like its own Update button, and opens it again.
++//!
++//! The request is handed over in a small file in the launcher's data folder, so it reaches the
++//! launcher that is already running too: a second start only tells the first one to show itself
++//! (`single_instance`), and the first one picks the file up then.
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++use std::sync::atomic::{AtomicU8, Ordering};
++use std::time::{Duration, Instant};
++
++use jacnex_studio_ui_egui::{JxActualizacion, LauncherUi};
++
++/// The flag an app's update notice starts the launcher with, followed by the app's id.
++pub const BANDERA: &str = "--actualizar";
++const ARCHIVO: &str = "actualizar-app.txt";
++
++/// How long a request is followed before the launcher gives up on it (an app that never closes,
++/// a release check that never answers, nobody signing in).
++const PLAZO: Duration = Duration::from_secs(15 * 60);
++/// How long an app the launcher already has as up to date waits for a fresh release check.
++const PLAZO_AL_DIA: Duration = Duration::from_secs(60);
++/// An update the launcher started but that is still pending this long after its last sign of work
++/// went wrong; the launcher's own error says why.
++const PLAZO_TRABAJO: Duration = Duration::from_secs(20);
++/// How often the launcher looks whether the app is still open.
++const CADA: Duration = Duration::from_millis(1500);
++
++const SIN_MIRAR: u8 = 0;
++const MIRANDO: u8 = 1;
++const ABIERTA: u8 = 2;
++const CERRADA: u8 = 3;
++
++/// An app id as the catalog has them: lower-case letters, digits and dashes. Anything else on the
++/// command line is ignored.
++pub fn id_valido(id: &str) -> bool {
++    !id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
++}
++
++/// The app `args` ask to update, if any.
++pub fn pedido_de(args: &[String]) -> Option<String> {
++    let at = args.iter().position(|a| a == BANDERA)?;
++    let id = args.get(at + 1)?;
++    id_valido(id).then(|| id.clone())
++}
++
++fn archivo() -> Option<PathBuf> {
++    jacnex_studio_native::paths::Paths::new().ok().map(|p| p.data.join(ARCHIVO))
++}
++
++/// Leaves the request for the launcher that will run (this one, or the one already running).
++pub fn dejar(id: &str) {
++    let Some(path) = archivo() else { return };
++    if let Err(e) = jacnex_studio_native::paths::write_atomic(&path, id.as_bytes()) {
++        log::warn!("couldn't hand over the update request for {id}: {e}");
++    }
++}
++
++/// Takes the request left by `dejar`, if there is one.
++pub fn tomar() -> Option<String> {
++    tomar_de(&archivo()?)
++}
++
++fn tomar_de(path: &Path) -> Option<String> {
++    // A request is a few bytes; anything bigger isn't one.
++    let pequeno = std::fs::metadata(path).ok()?.len() <= 64;
++    let leido = if pequeno { std::fs::read_to_string(path).ok() } else { None };
++    if let Err(e) = std::fs::remove_file(path) {
++        log::warn!("couldn't remove {}: {e}", path.display());
++    }
++    let id = leido?.trim().to_string();
++    id_valido(&id).then_some(id)
++}
++
++/// An update an app asked for, followed tick by tick.
++pub struct Pedido {
++    id: String,
++    desde: Instant,
++    /// The last release check when the request came in: a different one is a fresh answer.
++    busqueda_previa: Option<i64>,
++    /// When the update last showed any sign of work: asked for, downloading or installing.
++    trabajo: Option<Instant>,
++    /// Whether the app is still open, as the last look found (`SIN_MIRAR` … `CERRADA`).
++    abierta: Arc<AtomicU8>,
++    ultima_mirada: Option<Instant>,
++    /// The app's page is on screen.
++    mostrada: bool,
++}
++
++impl Pedido {
++    pub fn nuevo(id: String, ui: &mut LauncherUi, ctx: &egui::Context) -> Self {
++        log::info!("{id} asked to be updated from its update notice");
++        ui.check_now();
++        let mostrada = ui.jx_mostrar_app(ctx, &id);
++        Self {
++            id,
++            desde: Instant::now(),
++            busqueda_previa: ui.settings.last_check,
++            trabajo: None,
++            abierta: Arc::new(AtomicU8::new(SIN_MIRAR)),
++            ultima_mirada: None,
++            mostrada,
++        }
++    }
++
++    /// One step. `false` once the request is done with.
++    pub fn seguir(&mut self, ui: &mut LauncherUi, ctx: &egui::Context) -> bool {
++        let ahora = Instant::now();
++        if ahora.duration_since(self.desde) > PLAZO {
++            log::warn!("gave up updating {} as its update notice asked", self.id);
++            return false;
++        }
++        // Looks again soon, with or without a window.
++        ctx.request_repaint_after(Duration::from_millis(500));
++        if !self.mostrada {
++            self.mostrada = ui.jx_mostrar_app(ctx, &self.id);
++        }
++        match ui.jx_actualizacion(&self.id) {
++            JxActualizacion::Esperando => true,
++            JxActualizacion::Instalando => {
++                self.trabajo = Some(ahora);
++                true
++            }
++            JxActualizacion::Pendiente { ubicacion } => {
++                if let Some(t) = self.trabajo {
++                    if ahora.duration_since(t) > PLAZO_TRABAJO {
++                        log::warn!("the update {} asked for didn't go through", self.id);
++                        return false;
++                    }
++                    return true;
++                }
++                if self.cerrada(&ubicacion, ctx) {
++                    ui.jx_actualizar_app(ctx, &self.id);
++                    self.trabajo = Some(ahora);
++                }
++                true
++            }
++            JxActualizacion::AlDia => {
++                if self.trabajo.is_some() {
++                    log::info!("{} updated as its update notice asked; opening it again", self.id);
++                    ui.jx_abrir_app(&self.id);
++                    return false;
++                }
++                let fresca = ui.settings.last_check != self.busqueda_previa;
++                if !fresca && ahora.duration_since(self.desde) < PLAZO_AL_DIA {
++                    return true;
++                }
++                // Already the latest: the app closed for nothing, so it opens again once it is shut.
++                let Some(ubicacion) = ui.jx_ubicacion(&self.id) else { return false };
++                if self.cerrada(&ubicacion, ctx) {
++                    log::info!("{} is already up to date; opening it again", self.id);
++                    ui.jx_abrir_app(&self.id);
++                    return false;
++                }
++                true
++            }
++        }
++    }
++
++    /// Whether the app at `ubicacion` was found closed. Looking takes a moment (a process list),
++    /// so it happens off the UI thread and the answer comes on a later tick.
++    fn cerrada(&mut self, ubicacion: &str, ctx: &egui::Context) -> bool {
++        let estado = self.abierta.load(Ordering::Acquire);
++        if estado == CERRADA {
++            return true;
++        }
++        let toca = self.ultima_mirada.is_none_or(|t| t.elapsed() >= CADA);
++        if estado != MIRANDO && toca {
++            self.ultima_mirada = Some(Instant::now());
++            self.abierta.store(MIRANDO, Ordering::Release);
++            let (abierta, ubicacion, ctx) = (self.abierta.clone(), PathBuf::from(ubicacion), ctx.clone());
++            let mirar = move || {
++                let corre = jacnex_studio_native::process::is_running(&ubicacion);
++                abierta.store(if corre { ABIERTA } else { CERRADA }, Ordering::Release);
++                ctx.request_repaint();
++            };
++            if let Err(e) = std::thread::Builder::new().name("jacnex-pedido".into()).spawn(mirar) {
++                log::warn!("couldn't look whether the app is open: {e}");
++                self.abierta.store(SIN_MIRAR, Ordering::Release);
++            }
++        }
++        false
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn solo_ids_de_catalogo() {
++        assert!(id_valido("filmcraft"));
++        assert!(id_valido("ia-film2"));
++        assert!(!id_valido(""));
++        assert!(!id_valido("Filmcraft"));
++        assert!(!id_valido("../x"));
++        assert!(!id_valido("film craft"));
++        assert!(!id_valido(&"a".repeat(41)));
++    }
++
++    #[test]
++    fn lee_la_bandera() {
++        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
++        assert_eq!(pedido_de(&args(&["--actualizar", "filmcraft"])), Some("filmcraft".into()));
++        assert_eq!(pedido_de(&args(&["--hidden", "--actualizar", "photocraft"])), Some("photocraft".into()));
++        assert_eq!(pedido_de(&args(&["--actualizar"])), None);
++        assert_eq!(pedido_de(&args(&["--actualizar", "C:\\x.exe"])), None);
++        assert_eq!(pedido_de(&args(&[])), None);
++    }
++
++    #[test]
++    fn el_archivo_se_toma_una_vez() {
++        let path = std::env::temp_dir().join(format!("jacnex-pedido-prueba-{}.txt", std::process::id()));
++        assert!(std::fs::write(&path, "filmcraft\n").is_ok());
++        assert_eq!(tomar_de(&path), Some("filmcraft".into()));
++        assert!(!path.exists());
++        assert_eq!(tomar_de(&path), None);
++        assert!(std::fs::write(&path, "no válido").is_ok());
++        assert_eq!(tomar_de(&path), None);
++        assert!(!path.exists());
++    }
++}
+diff --git a/apps/jacnex-studio/src/main.rs b/apps/jacnex-studio/src/main.rs
+index 02f45b6..fd8520c 100644
+--- a/apps/jacnex-studio/src/main.rs
++++ b/apps/jacnex-studio/src/main.rs
+@@ -7,6 +7,7 @@
+ 
+ #[cfg(target_os = "macos")]
+ mod hiding;
++mod jacnex_pedido;
+ mod logging;
+ mod motion;
+ mod settings_file;
+@@ -80,6 +81,12 @@ fn main() -> ExitCode {
+         };
+     }
+     let mut hidden = args.iter().any(|a| a == login::HIDDEN_FLAG);
++    // Jacnex: an app's update notice asked for its update. Handed over before the single-instance
++    // claim, so a launcher that is already running picks it up when told to show itself.
++    if let Some(id) = jacnex_pedido::pedido_de(&args) {
++        jacnex_pedido::dejar(&id);
++        hidden = false;
++    }
+ 
+     let wake: Wake = Arc::new(OnceLock::new());
+     let starts = match single_instance::claim(wake.clone()) {
+@@ -764,6 +771,10 @@ struct Launcher {
+     /// eframe's settings file, which the launcher writes itself while there is no window.
+     settings_path: Option<PathBuf>,
+     waker: Option<Arc<Waker>>,
++    /// Jacnex: an update an app asked for from its update notice (`jacnex_pedido`).
++    pedido: Option<jacnex_pedido::Pedido>,
++    /// The request a start of this launcher may have left has been looked for.
++    pedido_leido: bool,
+ }
+ 
+ impl Launcher {
+@@ -796,6 +807,8 @@ impl Launcher {
+             closed_to_tray: false,
+             settings_path,
+             waker: None,
++            pedido: None,
++            pedido_leido: false,
+         }
+     }
+ 
+@@ -851,6 +864,17 @@ impl Launcher {
+         } else if !starts.is_empty() {
+             requests.push(Request::Show);
+         }
++        if (!self.pedido_leido || !starts.is_empty()) && !cfg!(test) {
++            self.pedido_leido = true;
++            if let Some(id) = jacnex_pedido::tomar() {
++                self.pedido = Some(jacnex_pedido::Pedido::nuevo(id, &mut self.ui, ctx));
++            }
++        }
++        if let Some(pedido) = self.pedido.as_mut()
++            && !pedido.seguir(&mut self.ui, ctx)
++        {
++            self.pedido = None;
++        }
+         let actions = self.tray.as_ref().map(tray::Tray::actions).unwrap_or_default();
+         for action in actions {
+             match action {
+diff --git a/crates/ui-egui/src/jacnex.rs b/crates/ui-egui/src/jacnex.rs
+index 41a171e..e2d0ee6 100644
+--- a/crates/ui-egui/src/jacnex.rs
++++ b/crates/ui-egui/src/jacnex.rs
+@@ -20,6 +20,9 @@ use crate::views::Primary;
+ use crate::widgets::{self, Kind};
+ 
+ mod acceso;
++mod pedido;
++
++pub use pedido::JxActualizacion;
+ 
+ const HEADER_H: f32 = 60.0;
+ const SHELF_W: f32 = 248.0;
+diff --git a/crates/ui-egui/src/jacnex/pedido.rs b/crates/ui-egui/src/jacnex/pedido.rs
+new file mode 100644
+index 0000000..cf1463a
+--- /dev/null
++++ b/crates/ui-egui/src/jacnex/pedido.rs
+@@ -0,0 +1,66 @@
++//! An app asked to be updated from its own update notice: its "Update" button starts Jacnex
++//! Studio with `--actualizar <app>` and closes the app. The desktop shell follows the request
++//! (`apps/jacnex-studio/src/jacnex_pedido.rs`) with what is here: how the app stands, and the same
++//! install and open actions as the app's own buttons.
++
++use jacnex_studio_core::status::AppStatus;
++
++use crate::app::LauncherUi;
++
++/// How an app that asked to be updated stands in the launcher.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum JxActualizacion {
++    /// Not known yet: the catalog or the release check hasn't answered, or nobody is signed in
++    /// (installing needs an account; the window shows the sign-in screen).
++    Esperando,
++    /// A newer version is out. `ubicacion` is the installed copy, to see whether it is still open.
++    Pendiente { ubicacion: String },
++    /// Downloading or installing.
++    Instalando,
++    /// The installed copy is the latest.
++    AlDia,
++}
++
++impl LauncherUi {
++    /// How `id` stands, for an update the app asked for.
++    pub fn jx_actualizacion(&self, id: &str) -> JxActualizacion {
++        let Some(e) = self.entry(id) else { return JxActualizacion::Esperando };
++        if e.job.is_some() {
++            return JxActualizacion::Instalando;
++        }
++        if self.sin_sesion || self.checking {
++            return JxActualizacion::Esperando;
++        }
++        match (e.status(self.platform, self.caps.manage_apps), &e.installed) {
++            (AppStatus::UpdateAvailable, Some(copia)) => JxActualizacion::Pendiente { ubicacion: copia.location.clone() },
++            (estado, _) if estado.is_installed() => JxActualizacion::AlDia,
++            _ => JxActualizacion::Esperando,
++        }
++    }
++
++    /// Where `id`'s installed copy is, to see whether it is open.
++    pub fn jx_ubicacion(&self, id: &str) -> Option<String> {
++        self.entry(id)?.installed.as_ref().map(|copia| copia.location.clone())
++    }
++
++    /// Shows `id`'s page in the window, on Apps. `false` while the catalog doesn't have it yet.
++    pub fn jx_mostrar_app(&self, ctx: &egui::Context, id: &str) -> bool {
++        if self.entry(id).is_none() {
++            return false;
++        }
++        self.jx_elegir(ctx, id);
++        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(super::EN_APPS), true));
++        true
++    }
++
++    /// Updates `id`, like its Update button.
++    pub fn jx_actualizar_app(&mut self, ctx: &egui::Context, id: &str) {
++        let _ = self.jx_mostrar_app(ctx, id);
++        self.install_app(id);
++    }
++
++    /// Opens `id`, like its Open button.
++    pub fn jx_abrir_app(&mut self, id: &str) {
++        self.launch_app(id);
++    }
++}
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index e2c3295..1f22080 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -40,6 +40,7 @@ mod views;
+ mod widgets;
+ 
+ pub use app::{Host, LauncherUi, TitleBar};
++pub use jacnex::JxActualizacion;
+ pub use jacnex::teclado as teclado_jacnex;
+ pub use i18n::{
+     Lang, LangInfo, current, detect_system_lang_in_background, fmt, has, lang_from_tag, message, msg, set_current, set_system_locales, system_lang,

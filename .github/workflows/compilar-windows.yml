@@ -154,6 +154,7 @@ jobs:
           $exes = @(Get-ChildItem -File -Filter *.exe)
           if (-not $exes) { throw 'No hay ningún .exe compilado' }
           $ponenAlDia = 0
+          $avisoConLauncher = 0
           foreach ($exe in $exes) {
             $texto = [IO.File]::ReadAllText($exe.FullName, [Text.Encoding]::GetEncoding(28591))
             if ($texto.Contains("so it doesn't install updates")) {
@@ -163,11 +164,16 @@ jobs:
               throw "$($exe.Name) tiene craft-update sin ajustar: no reconocería su propio MSI de Jacnex"
             }
             if ($texto.Contains('JacnexSuite/LauncherUpdate')) { $ponenAlDia++ }
+            if ($texto.Contains('jacnex.store para actualizar')) { $avisoConLauncher++ }
             Write-Output "$($exe.Name): craft-update ajustado"
           }
           # Las apps ponen al día un Jacnex Studio atascado en 0.19.2 (ver rebrand/bibliotecas.py).
           if ('${{ inputs.proyecto }}' -ne 'launcher' -and $ponenAlDia -eq 0) {
             throw 'La app no tiene el código que pone al día Jacnex Studio (bibliotecas.py)'
+          }
+          # El aviso de actualización de cada app la actualiza con Jacnex Studio, nunca con una página.
+          if ('${{ inputs.proyecto }}' -ne 'launcher' -and $avisoConLauncher -eq 0) {
+            throw 'El aviso de actualización de la app no usa Jacnex Studio (bibliotecas.py, dialog.rs)'
           }
 
       # Jacnex Studio instala las apps desde su zip portable y busca el .exe en la raíz del zip;

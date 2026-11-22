@@ -777,7 +777,7 @@ index ca72b01..2664577 100644
                  recover: None,
                  data_dir: None,
 diff --git a/apps/filmcraft/src/main.rs b/apps/filmcraft/src/main.rs
-index 55e4303..faa157e 100644
+index 55e4303..44e6736 100644
 --- a/apps/filmcraft/src/main.rs
 +++ b/apps/filmcraft/src/main.rs
 @@ -4,8 +4,8 @@
@@ -812,15 +812,15 @@ index 55e4303..faa157e 100644
              }
          } else if !startup_flag && session.prefs.general.at_startup == "emptyProject" {
          } else if demo {
-@@ -373,7 +369,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
+@@ -373,6 +369,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
              }
          }
          let mut app = FilmcraftApp::new(session);
--        app.set_startup_update_check(true);
-+        // Jacnex: updates and notices go only through the Jacnex Studio launcher.
++        // Jacnex: the update notice's button hands the update to Jacnex Studio (craft-update, as
++        // adjusted by jacnex-build), never to a release page.
+         app.set_startup_update_check(true);
          app.graphics_notice = notice;
          if recover == Some(false) {
-             app.dialog = None;
 diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
 index 818075c..826e8e4 100644
 --- a/crates/engine/Cargo.toml
