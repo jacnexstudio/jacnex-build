@@ -1,0 +1,251 @@
+diff --git a/crates/engine/src/cmd/appearance.rs b/crates/engine/src/cmd/appearance.rs
+index 2dfeb49..d13b79c 100644
+--- a/crates/engine/src/cmd/appearance.rs
++++ b/crates/engine/src/cmd/appearance.rs
+@@ -1270,6 +1270,13 @@ fn copy_from(s: &mut Session, p: &Value) -> Result<Value> {
+         None => s.eyedropper_sample.clone().ok_or_else(|| bad(C, "select the object to copy from"))?,
+     };
+     let picked = Picked::of(&node);
++    // Jacnex: a gradient mesh is drawn from its points' colours, not from its fill. On one with
++    // points picked (with Direct Selection or the Mesh tool, before the Eyedropper was chosen) the
++    // source's solid fill colour recolours just those points, as a fill colour does (`paint.setFill`).
++    let mesh_color = match super::paint::proxy_paint(&node, false, None) {
++        Paint::Solid { color, .. } if attrs.appearance.fill.color => Some(color),
++        _ => None,
++    };
+     if !reverse && !defaults_only {
+         s.eyedropper_sample = Some(node);
+     }
+@@ -1322,11 +1329,22 @@ fn copy_from(s: &mut Session, p: &Value) -> Result<Value> {
+         })?;
+         return Ok(json!({ "ids": ids.iter().map(|i| i.0).collect::<Vec<_>>() }));
+     }
++    let mesh_points = if mesh_color.is_some() { super::paint::picked_mesh_points(s, &targets) } else { vec![] };
+     // When every target comes out as it was, the document and its undo history stay as they are.
+     let before = s.doc()?.doc.clone();
+     super::overprint::edit_counted(s, "Eyedropper", |d| {
+         for id in &targets {
+             if let Some(n) = d.node_mut(*id) {
++                if let (Some(color), Some((_, points))) = (mesh_color, mesh_points.iter().find(|(m, _)| m == id))
++                    && let NodeKind::Mesh(m) = &mut n.kind
++                {
++                    for i in points {
++                        if let Some(q) = m.points.get_mut(*i) {
++                            q.color = color;
++                        }
++                    }
++                    continue;
++                }
+                 picked.apply(n, &attrs, append);
+             }
+         }
+diff --git a/crates/engine/src/cmd/paint.rs b/crates/engine/src/cmd/paint.rs
+index 93c4cbf..e30b26e 100644
+--- a/crates/engine/src/cmd/paint.rs
++++ b/crates/engine/src/cmd/paint.rs
+@@ -779,8 +779,15 @@ fn black_or_white(c: &Color) -> bool {
+ 
+ /// The points the active tool has picked (its `meshPoints` option: the Mesh tool's, Direct
+ /// Selection's or the Lasso's) on the gradient meshes among `ids`, in range, each mesh with its points.
+-fn picked_mesh_points(s: &Session, ids: &[NodeId]) -> Vec<(NodeId, Vec<usize>)> {
+-    let o = s.tool_options();
++/// Jacnex: with a tool that picks none (the Eyedropper), those Direct Selection or the Mesh tool
++/// had picked before it was chosen, while the selection is the same.
++pub(crate) fn picked_mesh_points(s: &Session, ids: &[NodeId]) -> Vec<(NodeId, Vec<usize>)> {
++    let mut o = s.tool_options();
++    if o.get("meshPoints").is_none()
++        && let Some(points) = s.kept_mesh_points()
++    {
++        o = json!({ "meshPoints": points });
++    }
+     let (Some(picked), Ok(st)) = (o.get("meshPoints").and_then(Value::as_array), s.doc()) else { return vec![] };
+     let mut out: Vec<(NodeId, Vec<usize>)> = vec![];
+     for pt in picked {
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index a1ad86e..6e0748b 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -95,6 +95,11 @@ pub struct Session {
+     /// in it are ones picked, not the Pen's last anchor, and Copy and Cut take them with the Pen or
+     /// Curvature tool back too (#6123).
+     pub(crate) lent_selection: Option<(u64, vectorcraft_doc::Selection)>,
++    /// Jacnex: the gradient mesh points (`meshPoints`) Direct Selection or the Mesh tool had picked
++    /// when another tool was chosen, in the document (its uid) and with the selection they were
++    /// picked in: while that selection stays, the Eyedropper and a fill colour recolour them, and
++    /// they come back picked with Direct Selection or the Mesh tool.
++    pub(crate) kept_mesh_points: Option<(u64, vectorcraft_doc::Selection, Value)>,
+     /// The selection tool chosen last (Selection, Direct Selection or Group Selection): the one Cmd
+     /// lends the other tools. None until one is chosen.
+     pub(crate) last_selection_tool: Option<&'static str>,
+diff --git a/crates/engine/src/session/documents.rs b/crates/engine/src/session/documents.rs
+index d399795..5ab7b37 100644
+--- a/crates/engine/src/session/documents.rs
++++ b/crates/engine/src/session/documents.rs
+@@ -56,6 +56,7 @@ impl Session {
+             tool_step: None,
+             selection_at_lend: None,
+             lent_selection: None,
++            kept_mesh_points: None,
+             last_selection_tool: None,
+             last_view: ViewInfo::default(),
+             preview_memo: Default::default(),
+diff --git a/crates/engine/src/tests/eyedropper.rs b/crates/engine/src/tests/eyedropper.rs
+index f8363fe..e79865e 100644
+--- a/crates/engine/src/tests/eyedropper.rs
++++ b/crates/engine/src/tests/eyedropper.rs
+@@ -791,3 +791,49 @@ fn eyedropper_shift_color_preserves_other_characters_and_clears_on_deselect() {
+         "after deselecting, ordinary object sampling styles the whole object"
+     );
+ }
++
++/// Jacnex: the gradient mesh points picked with Direct Selection or the Mesh tool take the colour
++/// the Eyedropper picks up, and only they do (the mesh is drawn from its points' colours); with
++/// the Eyedropper chosen a fill colour recolours them too, and back with that tool they are still
++/// picked. The Selection tool lets them go.
++#[test]
++fn jacnex_the_eyedropper_recolours_picked_mesh_points() {
++    let mut s = session();
++    rect(&mut s, 400.0);
++    s.execute("paint.setFill", &json!({"color": "#202040"})).unwrap();
++    let m = rect(&mut s, 10.0);
++    s.execute("paint.setFill", &json!({"color": "#ff0000"})).unwrap();
++    s.execute("object.mesh.create", &json!({"rows": 2, "cols": 2})).unwrap();
++    s.execute("select.set", &json!({"ids": [m.0]})).unwrap();
++    let v = ViewInfo::default();
++    let colors = |s: &Session| match node(s, m).kind {
++        NodeKind::Mesh(g) => g.points.iter().map(|p| p.color.to_hex()).collect::<Vec<_>>(),
++        k => panic!("not a mesh: {k:?}"),
++    };
++    let only_point_4 = |c: &[String], hex: &str, what: &str| {
++        assert_eq!(c[4], hex, "{what}: {c:?}");
++        assert!(c.iter().enumerate().all(|(i, x)| i == 4 || x == "#ff0000"), "{what}: the other points stay: {c:?}");
++    };
++    for tool in ["directSelection", "mesh"] {
++        s.select_tool(tool, v).unwrap();
++        let NodeKind::Mesh(g) = node(&s, m).kind else { panic!("not a mesh") };
++        let q = g.points[4].p;
++        for kind in [PointerKind::Down, PointerKind::Up] {
++            s.pointer(&PointerEvent::new(kind, q.x, q.y), v).unwrap();
++        }
++        let undo = undo_len(&s);
++        click(&mut s, 425.0, 35.0, Mods::default());
++        only_point_4(&colors(&s), "#202040", tool);
++        assert_eq!(undo_len(&s), undo + 1, "{tool}: one undo step");
++        s.execute("paint.setFill", &json!({"color": "#00ff00"})).unwrap();
++        only_point_4(&colors(&s), "#00ff00", &format!("{tool}: fill colour"));
++        s.select_tool(tool, v).unwrap();
++        assert_eq!(s.tool_options()["meshPoints"], json!([{"id": m.0, "index": 4}]), "{tool}: still picked");
++        s.execute("edit.undo", &json!({})).unwrap();
++        s.execute("edit.undo", &json!({})).unwrap();
++        assert!(colors(&s).iter().all(|c| c == "#ff0000"), "{tool}: undone");
++    }
++    s.select_tool("selection", v).unwrap();
++    click(&mut s, 425.0, 35.0, Mods::default());
++    assert!(colors(&s).iter().all(|c| c == "#ff0000"), "no point picked: {:?}", colors(&s));
++}
+diff --git a/crates/engine/src/tooling.rs b/crates/engine/src/tooling.rs
+index b222f32..25c60dc 100644
+--- a/crates/engine/src/tooling.rs
++++ b/crates/engine/src/tooling.rs
+@@ -163,13 +163,28 @@ impl Session {
+         let text_selection = ((id == "eyedropper" && is_type(self.tool.id())) || (self.tool.id() == "eyedropper" && is_type(id)))
+             .then(|| self.tool.options())
+             .filter(|o| o.get("editing").is_some_and(|v| !v.is_null()) && o.get("start") != o.get("end"));
++        // Jacnex: the mesh points the tool picked stay picked for the next tools (the Eyedropper).
++        let mesh_points = self.tool.options().get("meshPoints").cloned();
+         let acts = self.with_tool_cx(view, |t, cx| t.deactivate(cx));
+         self.apply_actions(acts)?;
+         self.keep_tool_settings();
++        if let Some(points) = mesh_points {
++            let picked = points.as_array().is_some_and(|a| !a.is_empty());
++            self.kept_mesh_points = self.active().filter(|_| picked).map(|d| (d.uid, d.selection.clone(), points));
++        }
++        // The Selection and Group Selection tools pick whole objects: the points are let go.
++        if matches!(id, "selection" | "groupSelection") {
++            self.kept_mesh_points = None;
++        }
+         self.tool = self.make_tool(id);
+         if let Some(selection) = text_selection {
+             self.tool.set_option("textSelection", &selection);
+         }
++        if self.tool.options().get("meshPoints").is_some()
++            && let Some(points) = self.kept_mesh_points()
++        {
++            self.tool.set_option("meshPoints", &points);
++        }
+         if vectorcraft_tools::catalog::is_selection_tool(id) {
+             self.last_selection_tool = Some(self.tool.id());
+             self.select_whole_instance(id);
+@@ -177,6 +192,14 @@ impl Session {
+         Ok(())
+     }
+ 
++    /// Jacnex: the mesh points kept from the tool chosen before ([`Session::kept_mesh_points`])
++    /// while the active document and its selection are those they were picked in.
++    pub(crate) fn kept_mesh_points(&self) -> Option<Value> {
++        let (uid, selection, points) = self.kept_mesh_points.as_ref()?;
++        let d = self.active()?;
++        (d.uid == *uid && d.selection == *selection).then(|| points.clone())
++    }
++
+     /// The selection tools other than Direct Selection pick whole objects: with one of them chosen,
+     /// an object selected in a symbol instance's art gives way to the instance. The revision
+     /// changes with it, so panels that cache by revision show the instance.
+diff --git a/crates/tools/src/direct.rs b/crates/tools/src/direct.rs
+index 292f1d2..5c928b0 100644
+--- a/crates/tools/src/direct.rs
++++ b/crates/tools/src/direct.rs
+@@ -736,6 +736,12 @@ impl Tool for DirectSelectionTool {
+     fn options(&self) -> Value {
+         self.mesh.options()
+     }
++    /// Jacnex: `meshPoints` picks those gradient mesh points (kept while another tool was chosen).
++    fn set_option(&mut self, key: &str, value: &Value) {
++        if key == "meshPoints" {
++            self.mesh.set_picked(value);
++        }
++    }
+     /// Escape during a drag (anchors, handles, segments, objects, type areas, blend spines, mesh
+     /// points, corner widgets, the brackets of type on a path, a marquee) cancels it: what it moved
+     /// goes back and the tool waits for the next press (#1743).
+diff --git a/crates/tools/src/meshblend.rs b/crates/tools/src/meshblend.rs
+index d64b4b1..22f4457 100644
+--- a/crates/tools/src/meshblend.rs
++++ b/crates/tools/src/meshblend.rs
+@@ -311,6 +311,12 @@ impl Tool for MeshTool {
+     fn options(&self) -> serde_json::Value {
+         self.edit.options()
+     }
++    /// Jacnex: `meshPoints` picks those gradient mesh points (kept while another tool was chosen).
++    fn set_option(&mut self, key: &str, value: &serde_json::Value) {
++        if key == "meshPoints" {
++            self.edit.set_picked(value);
++        }
++    }
+     fn busy(&self) -> bool {
+         self.edit.dragging()
+     }
+diff --git a/crates/tools/src/meshedit.rs b/crates/tools/src/meshedit.rs
+index c0c1d96..941dd86 100644
+--- a/crates/tools/src/meshedit.rs
++++ b/crates/tools/src/meshedit.rs
+@@ -296,6 +296,19 @@ impl MeshEdit {
+         json!({"meshPoints": self.picked.iter().map(|(id, index)| json!({"id": id.0, "index": index})).collect::<Vec<_>>()})
+     }
+ 
++    /// Jacnex: pick the points `v` lists (`[{id, index}…]`, as [`Self::options`] gives them): the
++    /// points picked before another tool was chosen (the Eyedropper) come back picked.
++    pub fn set_picked(&mut self, v: &Value) {
++        let Some(list) = v.as_array() else { return };
++        if self.drag.is_some() {
++            return;
++        }
++        let key = |p: &Value| Some((NodeId(p.get("id")?.as_u64()?), usize::try_from(p.get("index")?.as_u64()?).ok()?));
++        self.picked = list.iter().filter_map(key).collect();
++        self.focus = self.picked.first().copied().filter(|_| self.picked.len() == 1);
++        self.click = None;
++    }
++
+     /// The picked points of the meshes `shown` accepts, filled, and the focused point's handles
+     /// (lines and ends).
+     pub fn overlays(&self, cx: &ToolContext, shown: &dyn Fn(NodeId) -> bool) -> Vec<Overlay> {
