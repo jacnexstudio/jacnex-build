@@ -1,0 +1,383 @@
+diff --git a/apps/vectorcraft/Cargo.toml b/apps/vectorcraft/Cargo.toml
+index 62f582a..1913cce 100644
+--- a/apps/vectorcraft/Cargo.toml
++++ b/apps/vectorcraft/Cargo.toml
+@@ -58,7 +58,7 @@ pollster = "1"
+ # cores the process may run on. Win32_UI_Input_KeyboardAndMouse has `GetKeyState`, which
+ # src/caps_lock.rs uses to read whether Caps Lock is on. Win32_System_Registry has `RegGetValueW`,
+ # which src/host_services.rs uses to read the path Photonex registers under App Paths.
+-windows = { version = "0.62", features = ["Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
++windows = { version = "0.62", features = ["Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Pointer", "Win32_UI_WindowsAndMessaging"] }
+ # The renderer's worker count follows those cores (src/windows_cores.rs).
+ vectorcraft-render = { workspace = true }
+ 
+diff --git a/apps/vectorcraft/src/host_services.rs b/apps/vectorcraft/src/host_services.rs
+index 11a9c63..caafd07 100644
+--- a/apps/vectorcraft/src/host_services.rs
++++ b/apps/vectorcraft/src/host_services.rs
+@@ -7,6 +7,8 @@ use super::windows_stylus;
+ use super::{ClipboardProbeFactory, FilePick, PickRequest, Services, clipboard, cursor_theme, fileio, printing};
+ #[cfg(target_os = "macos")]
+ use super::{mac_save_format, mac_screen_color, mac_tablet};
++#[cfg(windows)]
++use super::windows_screen_color;
+ 
+ /// The window file dialogs belong to.
+ pub(crate) type Parent = Option<std::sync::Arc<winit::window::Window>>;
+@@ -331,7 +333,7 @@ pub(crate) fn services(parent: Parent, ui: egui::Context) -> Services {
+         .is_some_and(|h| matches!(h.as_raw(), RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)));
+     let (clip, clip_probe) = (parent.clone(), parent.clone());
+     let (p1, p2, p3, p4, p5) = (parent.clone(), parent.clone(), parent.clone(), parent.clone(), parent);
+-    #[cfg(target_os = "macos")]
++    #[cfg(any(target_os = "macos", windows))]
+     let sampled_ui = ui.clone();
+     Services {
+         pick_open: Some(Box::new(move |pick: &FilePick| pick_now(PickRequest::Open(pick.clone()), &p1).into_iter().next())),
+@@ -382,6 +384,9 @@ pub(crate) fn services(parent: Parent, ui: egui::Context) -> Services {
+         // Sample Color from Screen: the system's color sampler.
+         #[cfg(target_os = "macos")]
+         screen_color: Some(mac_screen_color::sampler(sampled_ui)),
++        // Jacnex: Windows has none; ours captures the screens and takes the color clicked.
++        #[cfg(windows)]
++        screen_color: Some(windows_screen_color::sampler(sampled_ui)),
+         // File → Print: the system's printers and print queue.
+         print: Some(Box::new(printing::SystemPrint)),
+         ..Default::default()
+diff --git a/apps/vectorcraft/src/main.rs b/apps/vectorcraft/src/main.rs
+index 6fa802a..ace116d 100644
+--- a/apps/vectorcraft/src/main.rs
++++ b/apps/vectorcraft/src/main.rs
+@@ -64,6 +64,8 @@ mod window_frame;
+ mod windows_alt_codes;
+ #[cfg(windows)]
+ mod windows_cores;
++#[cfg(windows)]
++mod windows_screen_color;
+ mod windows_stylus;
+ mod xwayland;
+ 
+diff --git a/apps/vectorcraft/src/windows_screen_color.rs b/apps/vectorcraft/src/windows_screen_color.rs
+new file mode 100644
+index 0000000..1e8170c
+--- /dev/null
++++ b/apps/vectorcraft/src/windows_screen_color.rs
+@@ -0,0 +1,319 @@
++//! Jacnex — Windows: Sample Color from Screen (`vectorcraft_ui_egui::screen_color`). Windows has no
++//! system color sampler, so this is one: the screens (every monitor) are captured and shown frozen
++//! in a borderless topmost window over all of them, with a cross cursor and a swatch of the color
++//! under it beside the cursor. A click answers that pixel's color; Escape or a right click cancels.
++//! The window runs on a thread of its own, with its own message loop, so the app's window keeps
++//! running. The pixels are the ones the displays show, taken as sRGB.
++//!
++//! GDI and the window procedure have no safe bindings; this module allows `unsafe_code`.
++#![allow(unsafe_code)]
++
++use std::cell::RefCell;
++use std::sync::mpsc::channel;
++
++use vectorcraft_ui_egui::screen_color::{Answer, StartSampler};
++use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
++use windows::Win32::Graphics::Gdi::{
++    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, BeginPaint, BitBlt, CAPTUREBLT, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush,
++    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FillRect, FrameRect, GetDC, GetDIBits, GetStockObject, HBITMAP, HBRUSH, HDC, HGDIOBJ,
++    InvalidateRect, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, WHITE_BRUSH,
++};
++use windows::Win32::System::LibraryLoader::GetModuleHandleW;
++use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE};
++use windows::Win32::UI::WindowsAndMessaging::{
++    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, IDC_CROSS, LoadCursorW, MSG,
++    PostQuitMessage, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SetForegroundWindow,
++    ShowWindow, TranslateMessage, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WNDCLASSW,
++    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
++};
++use windows::core::w;
++
++/// The swatch's side and its distance from the cursor, in pixels.
++const SWATCH: i32 = 40;
++const GAP: i32 = 20;
++
++/// The system's color sampler (this module's); `ui` is woken when it answers.
++pub fn sampler(ui: egui::Context) -> StartSampler {
++    Box::new(move || {
++        let (tx, rx) = channel();
++        let ui = ui.clone();
++        std::thread::Builder::new()
++            .name("screen-color".into())
++            .spawn(move || {
++                // The UI may be gone (the app quitting): nothing waits for the color then.
++                let _ = tx.send(run());
++                ui.request_repaint();
++            })
++            .map_err(|e| format!("can't show the color sampler: {e}"))?;
++        Ok(rx)
++    })
++}
++
++/// The screens as they were when the sampler was shown: a bitmap selected into a memory DC (to
++/// paint the window from) and its pixels (BGRA, top row first).
++struct Capture {
++    dc: HDC,
++    bitmap: HBITMAP,
++    /// What the DC held before the bitmap, put back before both are deleted.
++    old: HGDIOBJ,
++    pixels: Vec<u8>,
++    w: i32,
++    h: i32,
++}
++
++impl Drop for Capture {
++    fn drop(&mut self) {
++        // SAFETY: the DC and the bitmap were made by `capture` and are deleted once, here; the
++        // bitmap is taken out of the DC first.
++        unsafe {
++            if !self.old.is_invalid() {
++                SelectObject(self.dc, self.old);
++            }
++            if !self.bitmap.is_invalid() {
++                let _ = DeleteObject(self.bitmap.into());
++            }
++            if !self.dc.is_invalid() {
++                let _ = DeleteDC(self.dc);
++            }
++        }
++    }
++}
++
++impl Capture {
++    /// The color at `(x, y)` (window coordinates), as sRGB bytes.
++    fn pixel(&self, x: i32, y: i32) -> Option<[u8; 3]> {
++        if x < 0 || y < 0 || x >= self.w || y >= self.h {
++            return None;
++        }
++        let i = (usize::try_from(y).ok()? * usize::try_from(self.w).ok()? + usize::try_from(x).ok()?) * 4;
++        let p = self.pixels.get(i..i + 3)?;
++        Some([p[2], p[1], p[0]])
++    }
++}
++
++/// Capture the screen area `(x, y, w, h)` (the virtual screen: every monitor).
++fn capture(x: i32, y: i32, w: i32, h: i32) -> Result<Capture, String> {
++    let len = usize::try_from(w).ok().zip(usize::try_from(h).ok()).and_then(|(w, h)| w.checked_mul(h)?.checked_mul(4)).ok_or("no screen to sample")?;
++    // SAFETY: every handle is checked before use and released on every path (the screen DC here,
++    // the memory DC and bitmap by `Capture`'s drop); `GetDIBits` writes `h` rows of `w` 32-bit
++    // pixels into `pixels`, which holds exactly that, with the bitmap out of the DC as it requires.
++    unsafe {
++        let screen = GetDC(None);
++        if screen.is_invalid() {
++            return Err("can't read the screen".into());
++        }
++        let dc = CreateCompatibleDC(Some(screen));
++        let bitmap = if dc.is_invalid() { HBITMAP::default() } else { CreateCompatibleBitmap(screen, w, h) };
++        let old = if bitmap.is_invalid() { HGDIOBJ::default() } else { SelectObject(dc, bitmap.into()) };
++        let mut cap = Capture { dc, bitmap, old, pixels: vec![], w, h };
++        let copied = !old.is_invalid() && BitBlt(dc, 0, 0, w, h, Some(screen), x, y, SRCCOPY | CAPTUREBLT).is_ok();
++        ReleaseDC(None, screen);
++        if !copied {
++            return Err("can't read the screen".into());
++        }
++        let mut info = BITMAPINFO {
++            bmiHeader: BITMAPINFOHEADER {
++                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
++                biWidth: w,
++                // Negative: top row first.
++                biHeight: -h,
++                biPlanes: 1,
++                biBitCount: 32,
++                biCompression: BI_RGB.0,
++                ..Default::default()
++            },
++            ..Default::default()
++        };
++        cap.pixels = vec![0; len];
++        SelectObject(dc, old);
++        let rows = GetDIBits(dc, bitmap, 0, h.unsigned_abs(), Some(cap.pixels.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
++        cap.old = SelectObject(dc, bitmap.into());
++        if rows != h {
++            return Err("can't read the screen".into());
++        }
++        Ok(cap)
++    }
++}
++
++/// The sampler shown on this thread: the capture, where the cursor is and the color picked.
++struct Sampler {
++    cap: Capture,
++    at: Option<(i32, i32)>,
++    picked: Option<[f32; 3]>,
++}
++
++thread_local! {
++    static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
++}
++
++/// Show the sampler and wait for the person's click (the color) or cancel (`None`).
++fn run() -> Answer {
++    // SAFETY: plain queries with no pointers.
++    let (x, y, w, h) =
++        unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) };
++    if w <= 0 || h <= 0 {
++        return Err("no screen to sample".into());
++    }
++    let cap = capture(x, y, w, h)?;
++    let mut cursor = POINT::default();
++    // SAFETY: `cursor` is a live POINT for the call.
++    let at = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| (cursor.x - x, cursor.y - y));
++    SAMPLER.with(|s| *s.borrow_mut() = Some(Sampler { cap, at, picked: None }));
++    let shown = show(x, y, w, h);
++    let sampler = SAMPLER.with(|s| s.borrow_mut().take());
++    shown?;
++    Ok(sampler.and_then(|s| s.picked))
++}
++
++/// The window over every screen, and its message loop until it closes.
++fn show(x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
++    let class = w!("JacnexScreenColor");
++    // SAFETY: the class names `window_proc`, which has the signature Windows calls it with; the
++    // window is made, shown and pumped on this thread, and destroyed by `finish` (or with the
++    // thread's end), which ends the loop.
++    unsafe {
++        let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
++        let wc = WNDCLASSW {
++            lpfnWndProc: Some(window_proc),
++            hInstance: instance.into(),
++            lpszClassName: class,
++            hCursor: LoadCursorW(None, IDC_CROSS).unwrap_or_default(),
++            ..Default::default()
++        };
++        // 0 once a sampler shown before registered it: that class serves.
++        RegisterClassW(&wc);
++        let hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, class, w!("Color"), WS_POPUP, x, y, w, h, None, None, Some(instance.into()), None)
++            .map_err(|e| format!("can't show the color sampler: {e}"))?;
++        let _ = ShowWindow(hwnd, SW_SHOW);
++        let _ = SetForegroundWindow(hwnd);
++        let _ = SetFocus(Some(hwnd));
++        let mut msg = MSG::default();
++        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
++            let _ = TranslateMessage(&msg);
++            DispatchMessageW(&msg);
++        }
++    }
++    Ok(())
++}
++
++/// The swatch's rectangle beside the cursor at `at`, kept on the window `w` × `h`.
++fn swatch_rect((x, y): (i32, i32), w: i32, h: i32) -> RECT {
++    let left = if x + GAP + SWATCH > w { x - GAP - SWATCH } else { x + GAP };
++    let top = if y + GAP + SWATCH > h { y - GAP - SWATCH } else { y + GAP };
++    RECT { left, top, right: left + SWATCH, bottom: top + SWATCH }
++}
++
++/// The client coordinates in a mouse message's `lparam`.
++fn point(lparam: LPARAM) -> (i32, i32) {
++    let v = lparam.0 as u32;
++    (i32::from((v & 0xffff) as u16 as i16), i32::from((v >> 16) as u16 as i16))
++}
++
++/// Close the sampler with `picked` (`None`: canceled).
++fn finish(hwnd: HWND, picked: Option<[u8; 3]>) {
++    SAMPLER.with(|s| {
++        if let Some(s) = s.borrow_mut().as_mut() {
++            s.picked = picked.map(|c| c.map(|v| f32::from(v) / 255.0));
++        }
++    });
++    // SAFETY: `hwnd` is the sampler's window, on this thread.
++    let _ = unsafe { DestroyWindow(hwnd) };
++}
++
++extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
++    match msg {
++        WM_ERASEBKGND => LRESULT(1),
++        WM_PAINT => {
++            paint(hwnd);
++            LRESULT(0)
++        }
++        WM_MOUSEMOVE => {
++            let at = point(lparam);
++            SAMPLER.with(|s| {
++                if let Some(s) = s.borrow_mut().as_mut() {
++                    let (w, h) = (s.cap.w, s.cap.h);
++                    // SAFETY: the rectangles are live for the calls; `hwnd` is the sampler's window.
++                    unsafe {
++                        if let Some(old) = s.at {
++                            let _ = InvalidateRect(Some(hwnd), Some(&swatch_rect(old, w, h)), false);
++                        }
++                        let _ = InvalidateRect(Some(hwnd), Some(&swatch_rect(at, w, h)), false);
++                    }
++                    s.at = Some(at);
++                }
++            });
++            LRESULT(0)
++        }
++        WM_LBUTTONDOWN => {
++            let (x, y) = point(lparam);
++            let picked = SAMPLER.with(|s| s.borrow().as_ref().and_then(|s| s.cap.pixel(x, y)));
++            finish(hwnd, picked);
++            LRESULT(0)
++        }
++        WM_RBUTTONDOWN => {
++            finish(hwnd, None);
++            LRESULT(0)
++        }
++        WM_KEYDOWN if wparam.0 == usize::from(VK_ESCAPE.0) => {
++            finish(hwnd, None);
++            LRESULT(0)
++        }
++        WM_DESTROY => {
++            // SAFETY: ends this thread's message loop.
++            unsafe { PostQuitMessage(0) };
++            LRESULT(0)
++        }
++        // SAFETY: the message as Windows passed it.
++        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
++    }
++}
++
++/// Paint the frozen screens and the swatch of the color under the cursor.
++fn paint(hwnd: HWND) {
++    SAMPLER.with(|s| {
++        let s = s.borrow();
++        let mut ps = PAINTSTRUCT::default();
++        // SAFETY: `ps` is live between BeginPaint and EndPaint; the capture's DC holds its bitmap;
++        // the brush made here is deleted here, and stock brushes need no deleting.
++        unsafe {
++            let hdc = BeginPaint(hwnd, &mut ps);
++            if let Some(s) = s.as_ref() {
++                let r = ps.rcPaint;
++                let _ = BitBlt(hdc, r.left, r.top, r.right - r.left, r.bottom - r.top, Some(s.cap.dc), r.left, r.top, SRCCOPY);
++                if let Some(at) = s.at
++                    && let Some([red, green, blue]) = s.cap.pixel(at.0, at.1)
++                {
++                    let rect = swatch_rect(at, s.cap.w, s.cap.h);
++                    let brush = CreateSolidBrush(COLORREF(u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16)));
++                    FillRect(hdc, &rect, brush);
++                    let _ = DeleteObject(brush.into());
++                    FrameRect(hdc, &rect, HBRUSH(GetStockObject(BLACK_BRUSH).0));
++                    let inner = RECT { left: rect.left + 1, top: rect.top + 1, right: rect.right - 1, bottom: rect.bottom - 1 };
++                    FrameRect(hdc, &inner, HBRUSH(GetStockObject(WHITE_BRUSH).0));
++                }
++            }
++            let _ = EndPaint(hwnd, &ps);
++        }
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// The swatch sits below right of the cursor, and flips to stay on the screen near its edges.
++    #[test]
++    fn the_swatch_stays_on_the_screen() {
++        let r = swatch_rect((100, 100), 1000, 800);
++        assert_eq!((r.left, r.top), (100 + GAP, 100 + GAP));
++        let r = swatch_rect((995, 790), 1000, 800);
++        assert!(r.right <= 1000 && r.bottom <= 800, "{r:?}");
++    }
++
++    /// Mouse messages' coordinates are signed (left of or above the window's origin).
++    #[test]
++    fn mouse_points_are_signed() {
++        assert_eq!(point(LPARAM(((20u32 << 16) | 10) as isize)), (10, 20));
++        assert_eq!(point(LPARAM(((0xfffeu32 << 16) | 0xffff) as isize)), (-1, -2));
++    }
++}
