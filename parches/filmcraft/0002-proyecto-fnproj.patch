@@ -1,0 +1,543 @@
+diff --git a/apps/filmcraft/src/args.rs b/apps/filmcraft/src/args.rs
+index c3fab61..b869266 100644
+--- a/apps/filmcraft/src/args.rs
++++ b/apps/filmcraft/src/args.rs
+@@ -124,7 +124,8 @@ pub fn parse(env_control_port: Option<String>, args: impl IntoIterator<Item = Os
+ /// Whether a launch file is a Filmnex project. The extension's case does not matter: Windows file
+ /// associations and the Linux MIME glob start the app for `CUT.FCPROJ` too (#850).
+ pub fn is_project(path: &str) -> bool {
+-    Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj"))
++    // Jacnex: `.fnproj`, and `.fcproj` from before.
++    Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(filmcraft_engine::project_ext::is_project_ext)
+ }
+ 
+ /// `path` made absolute against the working directory, so a project or media file named relative
+diff --git a/apps/filmcraft/src/main.rs b/apps/filmcraft/src/main.rs
+index 6dda4ba..44ffa36 100644
+--- a/apps/filmcraft/src/main.rs
++++ b/apps/filmcraft/src/main.rs
+@@ -39,6 +39,8 @@ mod native_color;
+ #[cfg(target_os = "macos")]
+ mod native_menu;
+ mod window_raise;
++#[cfg(windows)]
++mod windows_file_types;
+ 
+ use args::{Cli, Launch};
+ use chrono::TimeZone;
+@@ -135,6 +137,9 @@ fn main() -> eframe::Result {
+         }
+     }
+     app_nap::disable();
++    // Jacnex: a double click on a project opens it here (Windows).
++    #[cfg(windows)]
++    windows_file_types::register_in_background();
+     #[cfg(target_os = "linux")]
+     dev_icon::ensure_dev_desktop_entry();
+     // Panics anywhere go to <data dir>/Logs/crash-<day>.log with a backtrace; the UI pass and
+@@ -407,7 +412,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
+         }));
+         app.hooks.pick_save = Some(Box::new(|name: &str| {
+             rfd::FileDialog::new()
+-                .add_filter(filmcraft_ui_egui::i18n::t("Filmnex Project"), &file_filters::extensions(&["fcproj"]))
++                .add_filter(filmcraft_ui_egui::i18n::t("Filmnex Project"), &file_filters::extensions(&filmcraft_engine::project_ext::PROJECT_EXTS))
+                 .set_file_name(name)
+                 .save_file()
+                 .map(|p| p.to_string_lossy().to_string())
+@@ -458,7 +463,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
+         }));
+         app.hooks.pick_open_project = Some(Box::new(|| {
+             rfd::FileDialog::new()
+-                .add_filter(filmcraft_ui_egui::i18n::t("Filmnex Project"), &file_filters::extensions(&["fcproj"]))
++                .add_filter(filmcraft_ui_egui::i18n::t("Filmnex Project"), &file_filters::extensions(&filmcraft_engine::project_ext::PROJECT_EXTS))
+                 // #1644: where the system MIME database doesn't know `.fcproj`, the project
+                 // filter hides every saved project; "All files" keeps them reachable.
+                 .add_filter(filmcraft_ui_egui::i18n::t("All files"), &file_filters::all_files())
+diff --git a/apps/filmcraft/src/windows_file_types.rs b/apps/filmcraft/src/windows_file_types.rs
+new file mode 100644
+index 0000000..7773d58
+--- /dev/null
++++ b/apps/filmcraft/src/windows_file_types.rs
+@@ -0,0 +1,99 @@
++//! Jacnex — Windows: a double click on a project (`.fnproj`, and `.fcproj` from before) opens it in
++//! Filmnex. Jacnex Studio installs the app per user without an installer, so the app registers the
++//! project types itself, for the current user only (`HKCU\Software\Classes`, no administrator
++//! rights), on a thread of its own at each start, writing only what is missing or out of date (the
++//! program's path, after an update moved it). Only the copy Jacnex Studio installed registers:
++//! a development build or a copy run from elsewhere would point the types at a file that goes away.
++
++use std::path::Path;
++
++use winreg::RegKey;
++use winreg::enums::HKEY_CURRENT_USER;
++
++/// The project type's identifier (Windows' "ProgID").
++const PROG_ID: &str = "Jacnex.Filmnex.Proyecto";
++
++/// Register the project types on a thread of its own when this is the installed app. A failure is
++/// only logged: opening projects from the app works without it.
++pub fn register_in_background() {
++    let Ok(exe) = std::env::current_exe() else { return };
++    if !installed_by_jacnex_studio(&exe) {
++        return;
++    }
++    let spawned = std::thread::Builder::new().name("file-types".into()).spawn(move || {
++        let classes = RegKey::predef(HKEY_CURRENT_USER).create_subkey(r"Software\Classes").map(|(key, _)| key);
++        match classes.and_then(|classes| register(&classes, &exe)) {
++            Ok(true) => log::info!("project files (.{}) open with {}", filmcraft_engine::project_ext::PROJECT_EXT, exe.display()),
++            Ok(false) => {}
++            Err(e) => log::warn!("can't register the project files with Windows: {e}"),
++        }
++    });
++    if let Err(e) = spawned {
++        log::warn!("can't register the project files with Windows: {e}");
++    }
++}
++
++/// Whether `exe` is the copy Jacnex Studio installed (`…\Jacnex Studio\apps\…`).
++fn installed_by_jacnex_studio(exe: &Path) -> bool {
++    let parts: Vec<String> = exe.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect();
++    parts.windows(2).any(|w| matches!(w, [a, b] if a == "jacnex studio" && b == "apps"))
++}
++
++/// Write the project types under `classes` (a `Software\Classes` key) for the program `exe`.
++/// `true` when something was written.
++fn register(classes: &RegKey, exe: &Path) -> std::io::Result<bool> {
++    let exe = exe.to_string_lossy();
++    let mut changed = false;
++    changed |= set(classes, PROG_ID, "", "Proyecto de Filmnex")?;
++    changed |= set(classes, &format!(r"{PROG_ID}\DefaultIcon"), "", &format!("\"{exe}\",0"))?;
++    changed |= set(classes, &format!(r"{PROG_ID}\shell\open\command"), "", &format!("\"{exe}\" \"%1\""))?;
++    for ext in filmcraft_engine::project_ext::PROJECT_EXTS {
++        changed |= set(classes, &format!(".{ext}"), "", PROG_ID)?;
++        changed |= set(classes, &format!(r".{ext}\OpenWithProgids"), PROG_ID, "")?;
++    }
++    Ok(changed)
++}
++
++/// Set the string `name` (`""`: the key's default value) of `key` under `root` to `value`, unless it
++/// already is. `true` when it was written.
++fn set(root: &RegKey, key: &str, name: &str, value: &str) -> std::io::Result<bool> {
++    let (key, _) = root.create_subkey(key)?;
++    if key.get_value::<String, _>(name).is_ok_and(|v| v == value) {
++        return Ok(false);
++    }
++    key.set_value(name, &value)?;
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_the_copy_jacnex_studio_installed_registers() {
++        assert!(installed_by_jacnex_studio(Path::new(r"C:\Users\a\AppData\Local\Jacnex Studio\apps\filmcraft\filmcraft.exe")));
++        assert!(installed_by_jacnex_studio(Path::new(r"C:\Users\a\AppData\Local\JACNEX STUDIO\Apps\filmcraft\filmcraft.exe")));
++        assert!(!installed_by_jacnex_studio(Path::new(r"C:\src\target\release\filmcraft.exe")));
++        assert!(!installed_by_jacnex_studio(Path::new(r"C:\Jacnex Studio\filmcraft.exe")));
++    }
++
++    /// Both extensions open with the program, and a second start writes nothing.
++    #[test]
++    fn the_project_types_open_with_the_program() {
++        let scratch = format!(r"Software\JacnexPruebaTipos-{}", std::process::id());
++        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
++        let (classes, _) = hkcu.create_subkey(&scratch).unwrap();
++        let exe = Path::new(r"C:\Jacnex Studio\apps\filmcraft\filmcraft.exe");
++        let first = register(&classes, exe);
++        let second = register(&classes, exe);
++        let command: Result<String, _> = classes.open_subkey(format!(r"{PROG_ID}\shell\open\command")).and_then(|k| k.get_value(""));
++        let types: Vec<Result<String, _>> = [".fnproj", ".fcproj"].iter().map(|e| classes.open_subkey(e).and_then(|k| k.get_value(""))).collect();
++        let _ = hkcu.delete_subkey_all(&scratch);
++        assert!(first.unwrap());
++        assert!(!second.unwrap(), "nothing to write the second time");
++        assert_eq!(command.unwrap(), r#""C:\Jacnex Studio\apps\filmcraft\filmcraft.exe" "%1""#);
++        for t in types {
++            assert_eq!(t.unwrap(), PROG_ID);
++        }
++    }
++}
+diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
+index 5c3da8f..24af07d 100644
+--- a/crates/engine/src/commands.rs
++++ b/crates/engine/src/commands.rs
+@@ -5359,8 +5359,9 @@ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
+ }
+ 
+ fn schema_backup_path(path: &str, schema: u32) -> String {
+-    let stem = path.strip_suffix(".fcproj").unwrap_or(path);
+-    format!("{stem} (schema v{schema} backup).fcproj")
++    // Jacnex: the backup keeps the project's own extension (`.fnproj`, or `.fcproj` from before).
++    let (stem, ext) = filmcraft_format::split_project_ext(path);
++    format!("{stem} (schema v{schema} backup).{}", ext.unwrap_or(filmcraft_format::PROJECT_EXT))
+ }
+ 
+ /// Make `proj` the session's project (fresh history, media pool and editor state).
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 95f3851..c9a80e2 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -45,6 +45,10 @@ pub mod presets;
+ pub mod previews;
+ pub mod prfpset;
+ pub mod project_manager;
++/// Jacnex: Filmnex projects are `.fnproj`; `.fcproj` (from before) still open.
++pub mod project_ext {
++    pub use filmcraft_format::{OLD_PROJECT_EXT, PROJECT_EXT, PROJECT_EXTS, is_project_ext, is_project_path, split_project_ext};
++}
+ pub mod project_panel;
+ pub mod project_tools;
+ pub mod proxies;
+diff --git a/crates/engine/src/media_browser.rs b/crates/engine/src/media_browser.rs
+index 0295db7..1d4b824 100644
+--- a/crates/engine/src/media_browser.rs
++++ b/crates/engine/src/media_browser.rs
+@@ -78,7 +78,7 @@ pub const DEFAULT_COLUMNS: [&str; 5] = ["Name", "Frame Rate", "Media Duration",
+ /// interchange document `file.import` reads ([`crate::interchange::EXTENSIONS`], AAF and OMF
+ /// included). Avid Log Exchange (`.ale`) is left out: Filmnex writes it (File ▸ Export) but,
+ /// like Premiere, does not read it (#1292).
+-const PROJECT_EXTENSIONS: [&str; 8] = ["fcproj", "edl", "xml", "fcpxml", "otio", "aaf", "omf", "omfi"];
++const PROJECT_EXTENSIONS: [&str; 9] = ["fnproj", "fcproj", "edl", "xml", "fcpxml", "otio", "aaf", "omf", "omfi"];
+ const CAPTION_EXTENSIONS: [&str; 3] = ["srt", "vtt", "scc"];
+ const RECENT_MAX: usize = 10;
+ 
+diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_manager.rs
+index 7efdac0..3f872b4 100644
+--- a/crates/engine/src/project_manager.rs
++++ b/crates/engine/src/project_manager.rs
+@@ -106,7 +106,7 @@ pub fn run(s: &mut Session, p: &Value) -> Result<Value> {
+         .or_else(|| s.path.as_deref().and_then(|x| Path::new(x).file_stem()).map(|n| n.to_string_lossy().into_owned()))
+         .unwrap_or_else(|| s.project.name.clone());
+     let dest_dir = PathBuf::from(&dest);
+-    let project_path = dest_dir.join(format!("{name}.fcproj")).to_string_lossy().into_owned();
++    let project_path = dest_dir.join(format!("{name}.{}", filmcraft_format::PROJECT_EXT)).to_string_lossy().into_owned();
+ 
+     // ---- the new project
+     let mut proj = (*s.project).clone();
+diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tools.rs
+index 1a0a040..68e9bc2 100644
+--- a/crates/engine/src/project_tools.rs
++++ b/crates/engine/src/project_tools.rs
+@@ -634,7 +634,7 @@ fn save_as_template(s: &mut Session, p: &Value) -> Result<Value> {
+         None => {
+             let dir = templates_dir(s).ok_or_else(|| bad("file.saveAsTemplate", "need `path` (no data directory for templates)"))?;
+             let _ = std::fs::create_dir_all(&dir);
+-            dir.join(format!("{}.fcproj", sanitize(&name))).to_string_lossy().to_string()
++            dir.join(format!("{}.{}", sanitize(&name), filmcraft_format::PROJECT_EXT)).to_string_lossy().to_string()
+         }
+     };
+     let mut proj = (*s.project).clone();
+@@ -653,7 +653,7 @@ fn list_templates(s: &mut Session, _: &Value) -> Result<Value> {
+     let mut v: Vec<Value> = std::fs::read_dir(&dir)
+         .map(|rd| {
+             rd.flatten()
+-                .filter(|e| e.path().extension().is_some_and(|x| x == "fcproj"))
++                .filter(|e| e.path().extension().and_then(|x| x.to_str()).is_some_and(filmcraft_format::is_project_ext))
+                 .map(|e| json!({"name": e.path().file_stem().map(|x| x.to_string_lossy().to_string()), "path": e.path().to_string_lossy()}))
+                 .collect()
+         })
+@@ -664,10 +664,18 @@ fn list_templates(s: &mut Session, _: &Value) -> Result<Value> {
+ 
+ fn new_from_template(s: &mut Session, p: &Value) -> Result<Value> {
+     let t = str_p(p, "template").ok_or_else(|| bad("file.newProjectFromTemplate", "need `template`"))?;
+-    let path = if t.ends_with(".fcproj") || t.contains('/') || t.contains('\\') {
++    let path = if filmcraft_format::split_project_ext(t).1.is_some() || t.contains('/') || t.contains('\\') {
+         t.to_string()
+     } else {
+-        templates_dir(s).map(|d| d.join(format!("{}.fcproj", sanitize(t))).to_string_lossy().to_string()).unwrap_or_else(|| t.to_string())
++        // Jacnex: a template saved before `.fnproj` is a `.fcproj`.
++        templates_dir(s)
++            .map(|d| {
++                let named = |ext: &str| d.join(format!("{}.{ext}", sanitize(t)));
++                let old = named(filmcraft_format::OLD_PROJECT_EXT);
++                let new = named(filmcraft_format::PROJECT_EXT);
++                if !new.exists() && old.exists() { old } else { new }.to_string_lossy().to_string()
++            })
++            .unwrap_or_else(|| t.to_string())
+     };
+     let bytes = s.services.read_file(&path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+     let mut proj = filmcraft_format::decode(&bytes).map_err(|e| EngineError::Other(e.to_string()))?.project;
+diff --git a/crates/format/src/autosave.rs b/crates/format/src/autosave.rs
+index 4e17d1e..66a2128 100644
+--- a/crates/format/src/autosave.rs
++++ b/crates/format/src/autosave.rs
+@@ -72,10 +72,10 @@ pub fn display_time(unix: i64, offset_secs: i32) -> String {
+     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+ }
+ 
+-/// `<stem>-YYYY-MM-DD_HH-MM-SS-<unix seconds>.fcproj`. The local stamp is for people; the unix time
++/// `<stem>-YYYY-MM-DD_HH-MM-SS-<unix seconds>.fnproj`. The local stamp is for people; the unix time
+ /// orders the files (the local clock can go back, or repeat an hour, when daylight saving time ends).
+ pub fn auto_save_name(name: &str, unix: i64, offset_secs: i32) -> String {
+-    format!("{}-{}-{unix}.fcproj", file_stem(name), timestamp(unix, offset_secs))
++    format!("{}-{}-{unix}.{}", file_stem(name), timestamp(unix, offset_secs), crate::PROJECT_EXT)
+ }
+ 
+ fn is_stamp(s: &str) -> bool {
+@@ -125,7 +125,9 @@ pub fn list_auto_saves(dir: &Path, name: &str) -> Vec<PathBuf> {
+         .filter_map(|e| e.ok())
+         .filter_map(|e| {
+             let f = e.file_name().to_string_lossy().into_owned();
+-            let (stamp, unix, collision) = parse_stamp(f.strip_prefix(&prefix)?.strip_suffix(".fcproj")?)?;
++            // Jacnex: auto-saves from before `.fnproj` are versions of the project too.
++            let (rest, ext) = crate::split_project_ext(f.strip_prefix(&prefix)?);
++            let (stamp, unix, collision) = parse_stamp(ext.map(|_| rest)?)?;
+             Some((unix, stamp.to_string(), collision, e.path()))
+         })
+         .collect();
+@@ -149,7 +151,7 @@ pub fn rotate(dir: &Path, name: &str, max: usize) -> io::Result<Vec<PathBuf>> {
+ pub fn write_auto_save(dir: &Path, name: &str, unix: i64, offset_secs: i32, data: &[u8], max: usize) -> io::Result<PathBuf> {
+     fs::create_dir_all(dir)?;
+     let base = auto_save_name(name, unix, offset_secs);
+-    let base_stem = base.trim_end_matches(".fcproj");
++    let base_stem = crate::split_project_ext(&base).0;
+     let collision_prefix = format!("{base_stem}-collision-");
+     // Continue after the highest collision already on disk: a lower free number (one rotation has
+     // removed) would sort before the newer saves and be rotated away as the oldest.
+@@ -157,7 +159,8 @@ pub fn write_auto_save(dir: &Path, name: &str, unix: i64, offset_secs: i32, data
+         .filter_map(|entry| entry.ok())
+         .filter_map(|entry| {
+             let file_name = entry.file_name();
+-            let digits = file_name.to_str()?.strip_prefix(&collision_prefix)?.strip_suffix(".fcproj")?;
++            let (rest, ext) = crate::split_project_ext(file_name.to_str()?.strip_prefix(&collision_prefix)?);
++            let digits = ext.map(|_| rest)?;
+             let n = digits.parse::<u64>().ok()?;
+             (n.to_string() == digits).then_some(n)
+         })
+@@ -169,14 +172,14 @@ pub fn write_auto_save(dir: &Path, name: &str, unix: i64, offset_secs: i32, data
+     };
+     let mut path = dir.join(&base);
+     if highest.is_some() {
+-        path = dir.join(format!("{base_stem}-collision-{collision}.fcproj"));
++        path = dir.join(format!("{base_stem}-collision-{collision}.{}", crate::PROJECT_EXT));
+         collision = collision.checked_add(1).ok_or_else(exhausted)?;
+     }
+     loop {
+         match crate::atomic_write_new(&path, data) {
+             Ok(()) => break,
+             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+-                path = dir.join(format!("{base_stem}-collision-{collision}.fcproj"));
++                path = dir.join(format!("{base_stem}-collision-{collision}.{}", crate::PROJECT_EXT));
+                 collision = collision.checked_add(1).ok_or_else(exhausted)?;
+             }
+             Err(e) => return Err(e),
+@@ -221,7 +224,7 @@ mod tests {
+ 
+     #[test]
+     fn names_and_stems() {
+-        assert_eq!(auto_save_name("My Film", 0, 0), "My Film-1970-01-01_00-00-00-0.fcproj");
++        assert_eq!(auto_save_name("My Film", 0, 0), "My Film-1970-01-01_00-00-00-0.fnproj");
+         assert_eq!(file_stem("a/b:c"), "a_b_c");
+         assert_eq!(file_stem("  "), "Untitled");
+         assert_eq!(auto_save_dir(Path::new("/x/y/p.fcproj")), Path::new("/x/y/Auto-Save"));
+@@ -278,7 +281,7 @@ mod tests {
+         assert!(!base.exists());
+         assert!(first_collision.exists());
+         let second_collision = write_auto_save(&d, "Cut", unix, 0, b"second collision", 1).unwrap();
+-        assert!(second_collision.ends_with(format!("Cut-{}-{unix}-collision-2.fcproj", timestamp(unix, 0))));
++        assert!(second_collision.ends_with(format!("Cut-{}-{unix}-collision-2.fnproj", timestamp(unix, 0))));
+         assert!(second_collision.exists());
+         assert_eq!(fs::read(&second_collision).unwrap(), b"second collision");
+         fs::remove_dir_all(&d).unwrap();
+@@ -295,7 +298,7 @@ mod tests {
+         // Rotation has removed the base and collision 1; the next save must not reuse number 1,
+         // which would sort before collision 2 and be deleted as the oldest.
+         let fourth = write_auto_save(&d, "Cut", unix, 0, b"third collision", 1).unwrap();
+-        assert!(fourth.ends_with(format!("Cut-{}-{unix}-collision-3.fcproj", timestamp(unix, 0))));
++        assert!(fourth.ends_with(format!("Cut-{}-{unix}-collision-3.fnproj", timestamp(unix, 0))));
+         assert_eq!(fs::read(&fourth).unwrap(), b"third collision");
+         assert_eq!(list_auto_saves(&d, "Cut"), vec![fourth]);
+         fs::remove_dir_all(&d).unwrap();
+@@ -326,8 +329,8 @@ mod tests {
+         fs::write(d.join("notes.txt"), b"keep").unwrap();
+         let left = list_auto_saves(&d, "Cut");
+         assert_eq!(left.len(), 5);
+-        assert!(left[0].to_string_lossy().ends_with(&format!("Cut-{}-1790000120.fcproj", timestamp(1_790_000_120, 0))));
+-        assert!(left[4].to_string_lossy().ends_with(&format!("Cut-{}-1790000360.fcproj", timestamp(1_790_000_360, 0))));
++        assert!(left[0].to_string_lossy().ends_with(&format!("Cut-{}-1790000120.fnproj", timestamp(1_790_000_120, 0))));
++        assert!(left[4].to_string_lossy().ends_with(&format!("Cut-{}-1790000360.fnproj", timestamp(1_790_000_360, 0))));
+         assert_eq!(list_auto_saves(&d, "Cut-Two").len(), 1);
+         assert!(d.join("notes.txt").exists());
+         rotate(&d, "Cut", 2).unwrap();
+diff --git a/crates/format/src/lib.rs b/crates/format/src/lib.rs
+index 289b165..e18bddf 100644
+--- a/crates/format/src/lib.rs
++++ b/crates/format/src/lib.rs
+@@ -69,6 +69,33 @@ pub const MIGRATIONS: &[Migration] = &[
+ /// The schema version this build writes (and the newest it reads).
+ pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32 + 1;
+ 
++/// Jacnex: the extension Filmnex saves projects with (`.fnproj`).
++pub const PROJECT_EXT: &str = "fnproj";
++/// Jacnex: the extension of projects saved before `.fnproj` (`.fcproj`). They still open, and
++/// Save keeps writing an open one to its own file.
++pub const OLD_PROJECT_EXT: &str = "fcproj";
++/// Jacnex: the project extensions Filmnex opens, the one it saves first.
++pub const PROJECT_EXTS: [&str; 2] = [PROJECT_EXT, OLD_PROJECT_EXT];
++
++/// Jacnex: whether `ext` (without the dot, any case) is a project's extension.
++pub fn is_project_ext(ext: &str) -> bool {
++    PROJECT_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext))
++}
++
++/// Jacnex: whether the file at `path` is a project (by its extension, any case).
++pub fn is_project_path(path: &str) -> bool {
++    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(is_project_ext)
++}
++
++/// Jacnex: `name` without its project extension (`.fnproj` or `.fcproj`, any case), and that
++/// extension (`None` when it has neither).
++pub fn split_project_ext(name: &str) -> (&str, Option<&str>) {
++    match name.rsplit_once('.') {
++        Some((stem, ext)) if is_project_ext(ext) => (stem, Some(ext)),
++        _ => (name, None),
++    }
++}
++
+ /// Oldest schema this build can still upgrade.
+ pub const OLDEST_SCHEMA: u32 = 1;
+ 
+diff --git a/crates/ui-egui/src/app/files.rs b/crates/ui-egui/src/app/files.rs
+index d4a08b3..78b652e 100644
+--- a/crates/ui-egui/src/app/files.rs
++++ b/crates/ui-egui/src/app/files.rs
+@@ -53,7 +53,7 @@ impl FilmcraftApp {
+             }),
+             "file.saveAs" | "file.save" | "file.saveCopy" => {
+                 let suggested =
+-                    if id == "file.saveCopy" { format!("{} copy.fcproj", self.session.project.name) } else { format!("{}.fcproj", self.session.project.name) };
++                    if id == "file.saveCopy" { format!("{} copy.fnproj", self.session.project.name) } else { format!("{}.fnproj", self.session.project.name) };
+                 let cmd = if id == "file.saveCopy" { "file.saveCopy" } else { "file.saveAs" };
+                 self.pick(FileDialog::SaveProject { name: suggested }, move |app, paths| {
+                     let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
+diff --git a/crates/ui-egui/src/app/input.rs b/crates/ui-egui/src/app/input.rs
+index 7b11cbb..c18f952 100644
+--- a/crates/ui-egui/src/app/input.rs
++++ b/crates/ui-egui/src/app/input.rs
+@@ -139,7 +139,7 @@ impl FilmcraftApp {
+ 
+ /// Whether a dropped file is a Filmnex project (opened, not imported).
+ fn is_project_file(path: &str) -> bool {
+-    std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("fcproj"))
++    filmcraft_engine::project_ext::is_project_path(path)
+ }
+ 
+ /// A physical-pixel screen position as a point in the window's UI space, given the window's content origin in points.
+diff --git a/crates/ui-egui/src/native_dialogs.rs b/crates/ui-egui/src/native_dialogs.rs
+index 62e01c0..83c850d 100644
+--- a/crates/ui-egui/src/native_dialogs.rs
++++ b/crates/ui-egui/src/native_dialogs.rs
+@@ -111,7 +111,8 @@ impl FileDialog {
+     /// `None` for dialogs that don't save, or that accept any name.
+     fn save_extensions(&self) -> Option<Vec<String>> {
+         match self {
+-            Self::SaveProject { .. } => Some(vec!["fcproj".to_string()]),
++            // Jacnex: a new name gets `.fnproj`; a `.fcproj` chosen as is stays one.
++            Self::SaveProject { .. } => Some(filmcraft_engine::project_ext::PROJECT_EXTS.iter().map(|e| (*e).to_string()).collect()),
+             Self::SaveAs { exts, adds_ext: true, .. } if exts.iter().any(|e| !e.is_empty() && e != "*") => Some(exts.clone()),
+             _ => None,
+         }
+@@ -255,7 +256,7 @@ pub(crate) const EXPORT_SAVE_DIALOGS: [(&str, &str, &str); 7] = [
+     ("file.exportFcpxml", "FCPXML", "fcpxml"),
+     ("file.exportOtio", "OpenTimelineIO", "otio"),
+     ("file.exportAle", "Avid Log Exchange", "ale"),
+-    ("file.exportSelectionProject", "Filmnex Project", "fcproj"),
++    ("file.exportSelectionProject", "Filmnex Project", "fnproj"),
+ ];
+ 
+ /// `then` for `dialog`: a save dialog's answer gets its extension ([`with_save_extension`]), and
+diff --git a/crates/ui-egui/src/panels/clip_dialogs.rs b/crates/ui-egui/src/panels/clip_dialogs.rs
+index 2878f02..3a09c4b 100644
+--- a/crates/ui-egui/src/panels/clip_dialogs.rs
++++ b/crates/ui-egui/src/panels/clip_dialogs.rs
+@@ -758,7 +758,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
+             let (prompt, ctx2) = (d.clone(), ctx.clone());
+             // the project the dialog saves (not one opened, created or closed to meanwhile)
+             let project = app.session.document_epoch;
+-            let name = format!("{}.fcproj", app.session.project.name);
++            let name = format!("{}.fnproj", app.session.project.name);
+             let r = app.pick(crate::native_dialogs::FileDialog::SaveProject { name }, move |app, paths| {
+                 if app.session.document_epoch != project {
+                     return Ok(Value::Null);
+diff --git a/crates/ui-egui/src/panels/menu_dialogs.rs b/crates/ui-egui/src/panels/menu_dialogs.rs
+index 0ee247d..dd3d5bc 100644
+--- a/crates/ui-egui/src/panels/menu_dialogs.rs
++++ b/crates/ui-egui/src/panels/menu_dialogs.rs
+@@ -222,7 +222,7 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
+             let (filter, ext, name) = if id == "file.exportAle" {
+                 (tl!("Avid Log Exchange"), "ale", format!("{}.ale", app.session.project.name))
+             } else {
+-                (tl!("Filmnex Project"), "fcproj", tlf!("{name} Selection.fcproj", name = app.session.project.name))
++                (tl!("Filmnex Project"), "fnproj", tlf!("{name} Selection.fcproj", name = app.session.project.name).replace(".fcproj", ".fnproj"))
+             };
+             let mut p = params.clone();
+             if !p.is_object() {
+diff --git a/crates/ui-egui/src/panels/project.rs b/crates/ui-egui/src/panels/project.rs
+index 13be62d..25b111f 100644
+--- a/crates/ui-egui/src/panels/project.rs
++++ b/crates/ui-egui/src/panels/project.rs
+@@ -416,7 +416,9 @@ fn body(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &View, actions
+         let parent = parent_bin(&app.session.project.root, v.bin);
+         navigate(app, v.inst, parent.map(|b| b.0));
+     }
+-    let mut crumb = format!("{}.fcproj", app.session.project.name);
++    // Jacnex: the open file's own extension (a project from before is still a `.fcproj`).
++    let ext = app.session.path.as_deref().and_then(|p| filmcraft_engine::project_ext::split_project_ext(p).1).unwrap_or(filmcraft_engine::project_ext::PROJECT_EXT);
++    let mut crumb = format!("{}.{ext}", app.session.project.name);
+     for b in bin_path(&app.session.project.root, v.bin) {
+         crumb.push_str(" / ");
+         crumb.push_str(&b);
+diff --git a/crates/ui-egui/tests/it/export_menu_ui.rs b/crates/ui-egui/tests/it/export_menu_ui.rs
+index caa3b35..de663b1 100644
+--- a/crates/ui-egui/tests/it/export_menu_ui.rs
++++ b/crates/ui-egui/tests/it/export_menu_ui.rs
+@@ -91,7 +91,7 @@ const SAVED: [(&str, &str); 6] = [
+     ("file.exportFcpxml", "fcpxml"),
+     ("file.exportOtio", "otio"),
+     ("file.exportAle", "ale"),
+-    ("file.exportSelectionProject", "fcproj"),
++    ("file.exportSelectionProject", "fnproj"),
+ ];
+ 
+ #[test]
+diff --git a/crates/ui-egui/tests/it/native_dialogs_ui.rs b/crates/ui-egui/tests/it/native_dialogs_ui.rs
+index e6a45ee..a8602a2 100644
+--- a/crates/ui-egui/tests/it/native_dialogs_ui.rs
++++ b/crates/ui-egui/tests/it/native_dialogs_ui.rs
+@@ -246,20 +246,20 @@ fn save_as_adds_the_project_extension_and_asks_before_replacing_what_that_names(
+         tx.send(vec![answer]).unwrap();
+         d.frames(3);
+     };
+-    // no extension: `cut` is saved as `cut.fcproj`
++    // no extension: `cut` is saved as `cut.fnproj`
+     save_as(&mut d, s(&dir.join("cut")));
+-    assert!(dir.join("cut.fcproj").is_file());
++    assert!(dir.join("cut.fnproj").is_file());
+     assert!(!dir.join("cut").exists());
+-    assert_eq!(d.app().session.path.as_deref(), Some(s(&dir.join("cut.fcproj")).as_str()));
++    assert_eq!(d.app().session.path.as_deref(), Some(s(&dir.join("cut.fnproj")).as_str()));
+     // another extension keeps it and adds ours; an upper-case `.FCPROJ` is kept as typed
+     save_as(&mut d, s(&dir.join("a.filmcraft")));
+-    assert!(dir.join("a.filmcraft.fcproj").is_file());
++    assert!(dir.join("a.filmcraft.fnproj").is_file());
+     save_as(&mut d, s(&dir.join("UPPER.FCPROJ")));
+     assert!(dir.join("UPPER.FCPROJ").is_file());
+     assert!(d.app().overwrite_prompt_path().is_none());
+ 
+-    // `keep` + `.fcproj` is an existing file: nothing is written until the user answers
+-    let keep = dir.join("keep.fcproj");
++    // `keep` + `.fnproj` is an existing file: nothing is written until the user answers
++    let keep = dir.join("keep.fnproj");
+     std::fs::write(&keep, "not a project").unwrap();
+     save_as(&mut d, s(&dir.join("keep")));
+     assert_eq!(d.app().overwrite_prompt_path(), Some(s(&keep).as_str()));
+@@ -277,7 +277,7 @@ fn save_as_adds_the_project_extension_and_asks_before_replacing_what_that_names(
+     assert!(d.app().overwrite_prompt_path().is_none());
+     assert!(std::fs::read_to_string(&keep).unwrap().starts_with('{'));
+     assert_eq!(d.app().session.path.as_deref(), Some(s(&keep).as_str()));
+-    // the chosen name already ends in `.fcproj`: the dialog asked, the app doesn't ask again
++    // the chosen name already ends in `.fnproj`: the dialog asked, the app doesn't ask again
+     save_as(&mut d, s(&keep));
+     assert!(d.app().overwrite_prompt_path().is_none());
+     // cancelled: nothing saved, no prompt
